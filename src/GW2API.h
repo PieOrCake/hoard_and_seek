@@ -80,6 +80,14 @@ namespace HoardAndSeek {
         // Query: has data been fetched?
         static bool HasAccountData();
 
+        // Timestamp of last successful data fetch (0 if never)
+        static time_t GetLastUpdated();
+
+        // Refresh cooldown: returns true if less than 5 min since last refresh
+        static bool IsRefreshOnCooldown();
+        // Unix timestamp when refresh becomes available again (0 if available now)
+        static time_t GetRefreshAvailableAt();
+
         // Search items by name substring (case-insensitive)
         static std::vector<SearchResult> SearchItems(const std::string& query);
 
@@ -123,10 +131,19 @@ namespace HoardAndSeek {
         static std::unordered_map<int, int> s_wallet;
 
         static bool s_has_account_data;
+        static time_t s_last_updated;
         static std::mutex s_mutex;
 
-        // HTTP helper
+        // HTTP helpers
+        struct HttpResponse {
+            int status_code = 0;   // HTTP status code (0 = network error)
+            std::string body;
+        };
         static std::string HttpGet(const std::string& url);
+        static HttpResponse HttpGetEx(const std::string& url);
+
+        // Returns empty string if response is valid JSON data, or an error message
+        static std::string CheckApiResponse(const HttpResponse& resp);
 
         static bool EnsureDataDirectory();
 

@@ -12,6 +12,7 @@
 #include <cstdint>
 
 #define HOARD_API_VERSION 1
+#define HOARD_REFRESH_COOLDOWN 300  // Minimum seconds between refreshes (5 minutes)
 
 // ============================================================================
 // Event Names
@@ -27,8 +28,12 @@
 // Payload: HoardFetchProgressPayload*
 #define EV_HOARD_FETCH_PROGRESS "EV_HOARD_FETCH_PROGRESS"
 
+// Raised when an account data fetch fails (API offline, network error, etc.).
+// Payload: HoardFetchErrorPayload*
+#define EV_HOARD_FETCH_ERROR   "EV_HOARD_FETCH_ERROR"
+
 // Raised by H&S in response to EV_HOARD_PING.
-// Payload: nullptr
+// Payload: HoardPongPayload*
 #define EV_HOARD_PONG           "EV_HOARD_PONG"
 
 // Requests (subscribe in your addon, raised by your addon) --------------------
@@ -80,6 +85,22 @@ struct HoardDataReadyPayload {
     uint32_t api_version;       // HOARD_API_VERSION
     uint32_t item_count;        // Number of unique items tracked
     uint32_t currency_count;    // Number of wallet currencies tracked
+    int64_t  last_updated;      // Unix timestamp of last successful fetch (0 if never)
+    int64_t  refresh_available_at; // Unix timestamp when next refresh is allowed
+};
+
+// Broadcast: pong response
+struct HoardPongPayload {
+    uint32_t api_version;          // HOARD_API_VERSION
+    int64_t  last_updated;         // Unix timestamp of last successful fetch (0 if never)
+    int64_t  refresh_available_at; // Unix timestamp when next refresh is allowed (0 = now)
+    uint8_t  has_data;             // 1 if account data is loaded, 0 otherwise
+};
+
+// Broadcast: fetch error
+struct HoardFetchErrorPayload {
+    uint32_t api_version;       // HOARD_API_VERSION
+    char message[256];          // Human-readable error message
 };
 
 // Broadcast: fetch progress update

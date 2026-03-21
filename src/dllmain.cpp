@@ -564,13 +564,22 @@ void OnQueryMastery(void* eventArgs) {
 
 void OnPing(void* eventArgs) {
     if (!APIDefs) return;
-    APIDefs->Events_Raise(EV_HOARD_PONG, nullptr);
+    static HoardPongPayload pong{};
+    pong.api_version = HOARD_API_VERSION;
+    pong.last_updated = (int64_t)HoardAndSeek::GW2API::GetLastUpdated();
+    pong.refresh_available_at = (int64_t)HoardAndSeek::GW2API::GetRefreshAvailableAt();
+    pong.has_data = HoardAndSeek::GW2API::HasAccountData() ? 1 : 0;
+    APIDefs->Events_Raise(EV_HOARD_PONG, &pong);
 }
 
 void OnRefreshRequest(void* eventArgs) {
     if (!APIDefs) return;
     auto status = HoardAndSeek::GW2API::GetFetchStatus();
     if (status == HoardAndSeek::FetchStatus::InProgress) return;
+    if (HoardAndSeek::GW2API::IsRefreshOnCooldown()) {
+        APIDefs->Log(LOGL_INFO, "HoardAndSeek", "Refresh request ignored (cooldown)");
+        return;
+    }
     HoardAndSeek::GW2API::FetchAccountDataAsync();
     APIDefs->Log(LOGL_INFO, "HoardAndSeek", "Refresh triggered by external addon");
 }
@@ -583,6 +592,8 @@ static void BroadcastDataUpdated() {
     // This is a lightweight broadcast, exact counts are informational
     payload.item_count = 0;
     payload.currency_count = 0;
+    payload.last_updated = (int64_t)HoardAndSeek::GW2API::GetLastUpdated();
+    payload.refresh_available_at = (int64_t)HoardAndSeek::GW2API::GetRefreshAvailableAt();
     APIDefs->Events_Raise(EV_HOARD_DATA_UPDATED, &payload);
 }
 
@@ -695,6 +706,17 @@ void AddonRender() {
             s_prevFetchStatus != HoardAndSeek::FetchStatus::Success) {
             BroadcastDataUpdated();
         }
+
+        // Broadcast error
+        if (curStatus == HoardAndSeek::FetchStatus::Error &&
+            s_prevFetchStatus != HoardAndSeek::FetchStatus::Error) {
+            static HoardFetchErrorPayload errPayload{};
+            errPayload.api_version = HOARD_API_VERSION;
+            strncpy(errPayload.message, curMessage.c_str(), sizeof(errPayload.message) - 1);
+            errPayload.message[sizeof(errPayload.message) - 1] = '\0';
+            APIDefs->Events_Raise(EV_HOARD_FETCH_ERROR, &errPayload);
+        }
+
         s_prevFetchStatus = curStatus;
     }
 
@@ -711,28 +733,110 @@ void AddonRender() {
     // Row 1: Refresh button + status message (always on same line)
     auto fetchStatus = HoardAndSeek::GW2API::GetFetchStatus();
     bool scanning = (fetchStatus == HoardAndSeek::FetchStatus::InProgress);
+    bool onCooldown = HoardAndSeek::GW2API::IsRefreshOnCooldown();
+    bool disabled = scanning || onCooldown;
 
-    if (scanning) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.5f);
-    if (ImGui::Button("Refresh Account Data") && !scanning) {
+    if (disabled) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.5f);
+    if (ImGui::Button("Refresh Account Data") && !disabled) {
         HoardAndSeek::GW2API::FetchAccountDataAsync();
     }
-    if (scanning) ImGui::PopStyleVar();
+    if (disabled) ImGui::PopStyleVar();
+
+    // Timer flags for transient status messages (must be file-scope statics so InProgress can reset them)
+    static bool s_successTimerStarted = false;
+    static bool s_successExpired = false;
+    static auto s_successTime = std::chrono::steady_clock::now();
+    static bool s_errorTimerStarted = false;
+    static bool s_errorExpired = false;
+    static auto s_errorTime = std::chrono::steady_clock::now();
 
     ImGui::SameLine();
     if (fetchStatus == HoardAndSeek::FetchStatus::InProgress) {
+        // Reset timers so next success/error shows fresh
+        s_successTimerStarted = false;
+        s_errorTimerStarted = false;
         ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.0f, 1.0f), "%s",
             HoardAndSeek::GW2API::GetFetchStatusMessage().c_str());
     } else if (fetchStatus == HoardAndSeek::FetchStatus::Error) {
-        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Error: %s",
-            HoardAndSeek::GW2API::GetFetchStatusMessage().c_str());
+        if (!s_errorTimerStarted) {
+            s_errorTime = std::chrono::steady_clock::now();
+            s_errorTimerStarted = true;
+            s_errorExpired = false;
+        }
+        if (!s_errorExpired) {
+            auto errElapsed = std::chrono::steady_clock::now() - s_errorTime;
+            if (std::chrono::duration_cast<std::chrono::seconds>(errElapsed).count() >= 5) {
+                s_errorExpired = true;
+            }
+        }
+        if (!s_errorExpired) {
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Error: %s",
+                HoardAndSeek::GW2API::GetFetchStatusMessage().c_str());
+        } else {
+            time_t last = HoardAndSeek::GW2API::GetLastUpdated();
+            if (last > 0) {
+                time_t now = std::time(nullptr);
+                int el = (int)difftime(now, last);
+                std::string ago;
+                if (el < 60) ago = "just now";
+                else if (el < 3600) ago = std::to_string(el / 60) + "m ago";
+                else if (el < 86400) ago = std::to_string(el / 3600) + "h ago";
+                else ago = std::to_string(el / 86400) + "d ago";
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Last updated %s", ago.c_str());
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Error: %s",
+                    HoardAndSeek::GW2API::GetFetchStatusMessage().c_str());
+            }
+        }
     } else if (fetchStatus == HoardAndSeek::FetchStatus::Success) {
-        ImGui::TextColored(ImVec4(0.35f, 0.82f, 0.35f, 1.0f), "%s",
-            HoardAndSeek::GW2API::GetFetchStatusMessage().c_str());
+        // Show green "Done" message for 5s, then show "Last updated"
+        if (!s_successTimerStarted) {
+            s_successTime = std::chrono::steady_clock::now();
+            s_successTimerStarted = true;
+            s_successExpired = false;
+        }
+        if (!s_successExpired) {
+            auto elapsed = std::chrono::steady_clock::now() - s_successTime;
+            if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() >= 5) {
+                s_successExpired = true;
+            }
+        }
+        if (!s_successExpired) {
+            ImGui::TextColored(ImVec4(0.35f, 0.82f, 0.35f, 1.0f), "%s",
+                HoardAndSeek::GW2API::GetFetchStatusMessage().c_str());
+        } else {
+            time_t last = HoardAndSeek::GW2API::GetLastUpdated();
+            if (last > 0) {
+                time_t now = std::time(nullptr);
+                int el = (int)difftime(now, last);
+                std::string ago;
+                if (el < 60) ago = "just now";
+                else if (el < 3600) ago = std::to_string(el / 60) + "m ago";
+                else if (el < 86400) ago = std::to_string(el / 3600) + "h ago";
+                else ago = std::to_string(el / 86400) + "d ago";
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Last updated %s", ago.c_str());
+            } else {
+                ImGui::TextUnformatted("");
+            }
+        }
     } else if (!HoardAndSeek::GW2API::HasAccountData()) {
         ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
             "No data. Set API key in settings first.");
+    } else if (HoardAndSeek::GW2API::HasAccountData()) {
+        time_t last = HoardAndSeek::GW2API::GetLastUpdated();
+        if (last > 0) {
+            time_t now = std::time(nullptr);
+            int elapsed = (int)difftime(now, last);
+            std::string ago;
+            if (elapsed < 60) ago = "just now";
+            else if (elapsed < 3600) ago = std::to_string(elapsed / 60) + "m ago";
+            else if (elapsed < 86400) ago = std::to_string(elapsed / 3600) + "h ago";
+            else ago = std::to_string(elapsed / 86400) + "d ago";
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Last updated %s", ago.c_str());
+        } else {
+            ImGui::TextUnformatted("");
+        }
     } else {
-        // Empty placeholder to keep consistent line height
         ImGui::TextUnformatted("");
     }
 

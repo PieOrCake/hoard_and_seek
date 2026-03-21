@@ -92,9 +92,10 @@ Copy `include/HoardAndSeekAPI.h` into your addon's include path. All communicati
 |---|---|---|
 | `EV_HOARD_DATA_UPDATED` | `HoardDataReadyPayload*` | Raised when account data finishes loading (startup cache or refresh) |
 | `EV_HOARD_FETCH_PROGRESS` | `HoardFetchProgressPayload*` | Raised during an account data fetch with a status message (e.g. "Fetching bank...", "Fetching inventory: Character...") |
-| `EV_HOARD_PONG` | `nullptr` | Raised in response to `EV_HOARD_PING` — confirms H&S is loaded |
+| `EV_HOARD_FETCH_ERROR` | `HoardFetchErrorPayload*` | Raised when a fetch fails (API offline, network error, invalid key, etc.) |
+| `EV_HOARD_PONG` | `HoardPongPayload*` | Raised in response to `EV_HOARD_PING` — confirms H&S is loaded, includes `last_updated`, `refresh_available_at`, and `has_data` |
 
-Subscribe to `EV_HOARD_DATA_UPDATED` to know when H&S has data available for queries. Subscribe to `EV_HOARD_FETCH_PROGRESS` to show live progress in your addon's UI.
+Subscribe to `EV_HOARD_DATA_UPDATED` to know when H&S has data available for queries. Subscribe to `EV_HOARD_FETCH_PROGRESS` to show live progress in your addon's UI. Subscribe to `EV_HOARD_FETCH_ERROR` to detect and display fetch failures (e.g. GW2 API maintenance).
 
 #### Requests (raised by your addon)
 
@@ -113,6 +114,8 @@ Subscribe to `EV_HOARD_DATA_UPDATED` to know when H&S has data available for que
 For query events, you provide a `response_event` name in the request struct. H&S processes the query, then raises that named event with a heap-allocated response payload. **The caller is responsible for freeing the response with `delete`.**
 
 `EV_HOARD_QUERY_ITEM` and `EV_HOARD_QUERY_WALLET` return cached data (fast, synchronous-feeling). `EV_HOARD_QUERY_ACHIEVEMENT` and `EV_HOARD_QUERY_MASTERY` are **proxy queries** that make a live API call using H&S's stored API key, so the response is asynchronous with network latency.
+
+`HoardDataReadyPayload` includes a `last_updated` field (Unix timestamp) indicating when the account data was last successfully fetched, and a `refresh_available_at` field indicating when the next refresh is allowed (0 if available now). H&S enforces a 5-minute cooldown (`HOARD_REFRESH_COOLDOWN`) between refreshes since the GW2 API does not update instantly. `EV_HOARD_REFRESH` requests during cooldown are silently ignored.
 
 ### Example: Query Item Count
 

@@ -1,4 +1,5 @@
 #include "GW2API.h"
+#include "HoardAndSeekAPI.h"
 
 #include <windows.h>
 #include <wininet.h>
@@ -48,6 +49,7 @@ namespace HoardAndSeek {
     std::unordered_map<uint32_t, ItemInfo> GW2API::s_item_cache;
     std::unordered_map<int, int> GW2API::s_wallet;
     bool GW2API::s_has_account_data = false;
+    time_t GW2API::s_last_updated = 0;
     std::mutex GW2API::s_mutex;
 
     // Helper: get the DLL directory
@@ -110,6 +112,62 @@ namespace HoardAndSeek {
         InternetCloseHandle(hUrl);
         InternetCloseHandle(hInternet);
         return result;
+    }
+
+    GW2API::HttpResponse GW2API::HttpGetEx(const std::string& url) {
+        HttpResponse result;
+        HINTERNET hInternet = InternetOpenA("HoardAndSeek/1.0",
+            INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+        if (!hInternet) return result;
+
+        DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE |
+                      INTERNET_FLAG_SECURE | INTERNET_FLAG_IGNORE_CERT_CN_INVALID;
+
+        HINTERNET hUrl = InternetOpenUrlA(hInternet, url.c_str(), NULL, 0, flags, 0);
+        if (!hUrl) {
+            InternetCloseHandle(hInternet);
+            return result;
+        }
+
+        // Query HTTP status code
+        DWORD statusCode = 0;
+        DWORD statusSize = sizeof(statusCode);
+        HttpQueryInfoA(hUrl, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER,
+                       &statusCode, &statusSize, NULL);
+        result.status_code = (int)statusCode;
+
+        char buffer[8192];
+        DWORD bytesRead;
+        while (InternetReadFile(hUrl, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
+            result.body.append(buffer, bytesRead);
+        }
+
+        InternetCloseHandle(hUrl);
+        InternetCloseHandle(hInternet);
+        return result;
+    }
+
+    std::string GW2API::CheckApiResponse(const HttpResponse& resp) {
+        if (resp.status_code == 0)
+            return "No response (network error or API offline)";
+        if (resp.status_code == 502 || resp.status_code == 503)
+            return "GW2 API is temporarily unavailable (maintenance)";
+        if (resp.status_code >= 500)
+            return "GW2 API server error (HTTP " + std::to_string(resp.status_code) + ")";
+        if (resp.body.empty())
+            return "Empty response from API";
+        // Detect HTML error pages (API gateway failures)
+        if (resp.body.size() > 0 && resp.body[0] == '<')
+            return "GW2 API returned unexpected response (possible maintenance)";
+        // Check for JSON error object
+        try {
+            json j = json::parse(resp.body);
+            if (j.is_object() && j.contains("text"))
+                return "GW2 API: " + j["text"].get<std::string>();
+        } catch (...) {
+            return "GW2 API returned invalid response";
+        }
+        return ""; // OK
     }
 
     std::string GW2API::AuthenticatedGet(const std::string& url) {
@@ -369,27 +427,23 @@ namespace HoardAndSeek {
                     return;
                 }
 
-                // 1. Material Storage
+                // 1. Material Storage (also serves as API availability check)
                 {
                     std::lock_guard<std::mutex> lock(s_mutex);
                     s_fetch_message = "Fetching material storage...";
                 }
                 std::string url = "https://api.guildwars2.com/v2/account/materials?access_token=" + key;
-                std::string response = HttpGet(url);
-                if (response.empty()) {
+                auto firstResp = HttpGetEx(url);
+                std::string apiError = CheckApiResponse(firstResp);
+                if (!apiError.empty()) {
                     std::lock_guard<std::mutex> lock(s_mutex);
                     s_fetch_status = FetchStatus::Error;
-                    s_fetch_message = "No response from API (network error?)";
+                    s_fetch_message = apiError;
                     return;
                 }
+                std::string response = firstResp.body;
                 {
                     json j = json::parse(response);
-                    if (j.is_object() && j.contains("text")) {
-                        std::lock_guard<std::mutex> lock(s_mutex);
-                        s_fetch_status = FetchStatus::Error;
-                        s_fetch_message = "API error: " + j["text"].get<std::string>();
-                        return;
-                    }
                     if (j.is_array()) {
                         for (const auto& slot : j) {
                             if (slot.is_null() || !slot.contains("id")) continue;
@@ -414,22 +468,24 @@ namespace HoardAndSeek {
                 url = "https://api.guildwars2.com/v2/account/bank?access_token=" + key;
                 response = HttpGet(url);
                 if (!response.empty()) {
-                    json j = json::parse(response);
-                    if (j.is_array()) {
-                        int slot_index = 0;
-                        for (const auto& slot : j) {
-                            if (!slot.is_null() && slot.contains("id")) {
-                                uint32_t id = slot["id"].get<uint32_t>();
-                                int count = slot.value("count", 1);
-                                // Bank tabs are 30 slots each
-                                int tab = (slot_index / 30) + 1;
-                                std::string sub = "Tab " + std::to_string(tab);
-                                AddItemLocation(locations, id, "Bank", sub, count);
-                                all_item_ids.push_back(id);
+                    try {
+                        json j = json::parse(response);
+                        if (j.is_array()) {
+                            int slot_index = 0;
+                            for (const auto& slot : j) {
+                                if (!slot.is_null() && slot.contains("id")) {
+                                    uint32_t id = slot["id"].get<uint32_t>();
+                                    int count = slot.value("count", 1);
+                                    // Bank tabs are 30 slots each
+                                    int tab = (slot_index / 30) + 1;
+                                    std::string sub = "Tab " + std::to_string(tab);
+                                    AddItemLocation(locations, id, "Bank", sub, count);
+                                    all_item_ids.push_back(id);
+                                }
+                                slot_index++;
                             }
-                            slot_index++;
                         }
-                    }
+                    } catch (...) {}
                 }
 
                 // 3. Shared Inventory
@@ -462,66 +518,68 @@ namespace HoardAndSeek {
                 url = "https://api.guildwars2.com/v2/characters?access_token=" + key;
                 response = HttpGet(url);
                 if (!response.empty()) {
-                    json chars = json::parse(response);
-                    if (chars.is_array()) {
-                        for (const auto& char_name_json : chars) {
-                            std::string char_name = char_name_json.get<std::string>();
-                            std::string encoded_name = UrlEncode(char_name);
+                    try {
+                        json chars = json::parse(response);
+                        if (chars.is_array()) {
+                            for (const auto& char_name_json : chars) {
+                                std::string char_name = char_name_json.get<std::string>();
+                                std::string encoded_name = UrlEncode(char_name);
 
-                            {
-                                std::lock_guard<std::mutex> lock(s_mutex);
-                                s_fetch_message = "Fetching inventory: " + char_name + "...";
-                            }
+                                {
+                                    std::lock_guard<std::mutex> lock(s_mutex);
+                                    s_fetch_message = "Fetching inventory: " + char_name + "...";
+                                }
 
-                            // Character inventory (bags)
-                            std::string inv_url = "https://api.guildwars2.com/v2/characters/" +
-                                encoded_name + "/inventory?access_token=" + key;
-                            std::string inv_response = HttpGet(inv_url);
-                            if (!inv_response.empty()) {
-                                try {
-                                    json inv = json::parse(inv_response);
-                                    if (inv.contains("bags") && inv["bags"].is_array()) {
-                                        int bag_num = 0;
-                                        for (const auto& bag : inv["bags"]) {
-                                            bag_num++;
-                                            if (bag.is_null() || !bag.contains("inventory")) continue;
-                                            for (const auto& item : bag["inventory"]) {
-                                                if (item.is_null() || !item.contains("id")) continue;
-                                                uint32_t id = item["id"].get<uint32_t>();
-                                                int count = item.value("count", 1);
-                                                std::string sub = "Bag " + std::to_string(bag_num);
-                                                AddItemLocation(locations, id, char_name, sub, count);
+                                // Character inventory (bags)
+                                std::string inv_url = "https://api.guildwars2.com/v2/characters/" +
+                                    encoded_name + "/inventory?access_token=" + key;
+                                std::string inv_response = HttpGet(inv_url);
+                                if (!inv_response.empty()) {
+                                    try {
+                                        json inv = json::parse(inv_response);
+                                        if (inv.contains("bags") && inv["bags"].is_array()) {
+                                            int bag_num = 0;
+                                            for (const auto& bag : inv["bags"]) {
+                                                bag_num++;
+                                                if (bag.is_null() || !bag.contains("inventory")) continue;
+                                                for (const auto& item : bag["inventory"]) {
+                                                    if (item.is_null() || !item.contains("id")) continue;
+                                                    uint32_t id = item["id"].get<uint32_t>();
+                                                    int count = item.value("count", 1);
+                                                    std::string sub = "Bag " + std::to_string(bag_num);
+                                                    AddItemLocation(locations, id, char_name, sub, count);
+                                                    all_item_ids.push_back(id);
+                                                }
+                                            }
+                                        }
+                                    } catch (...) {}
+                                }
+
+                                // Character equipment
+                                {
+                                    std::lock_guard<std::mutex> lock(s_mutex);
+                                    s_fetch_message = "Fetching equipment: " + char_name + "...";
+                                }
+                                std::string equip_url = "https://api.guildwars2.com/v2/characters/" +
+                                    encoded_name + "/equipment?access_token=" + key;
+                                std::string equip_response = HttpGet(equip_url);
+                                if (!equip_response.empty()) {
+                                    try {
+                                        json equip = json::parse(equip_response);
+                                        if (equip.contains("equipment") && equip["equipment"].is_array()) {
+                                            for (const auto& piece : equip["equipment"]) {
+                                                if (piece.is_null() || !piece.contains("id")) continue;
+                                                uint32_t id = piece["id"].get<uint32_t>();
+                                                std::string slot_name = piece.value("slot", "Unknown");
+                                                AddItemLocation(locations, id, char_name, "Equipped: " + slot_name, 1);
                                                 all_item_ids.push_back(id);
                                             }
                                         }
-                                    }
-                                } catch (...) {}
-                            }
-
-                            // Character equipment
-                            {
-                                std::lock_guard<std::mutex> lock(s_mutex);
-                                s_fetch_message = "Fetching equipment: " + char_name + "...";
-                            }
-                            std::string equip_url = "https://api.guildwars2.com/v2/characters/" +
-                                encoded_name + "/equipment?access_token=" + key;
-                            std::string equip_response = HttpGet(equip_url);
-                            if (!equip_response.empty()) {
-                                try {
-                                    json equip = json::parse(equip_response);
-                                    if (equip.contains("equipment") && equip["equipment"].is_array()) {
-                                        for (const auto& piece : equip["equipment"]) {
-                                            if (piece.is_null() || !piece.contains("id")) continue;
-                                            uint32_t id = piece["id"].get<uint32_t>();
-                                            std::string slot_name = piece.value("slot", "Unknown");
-                                            AddItemLocation(locations, id, char_name, "Equipped: " + slot_name, 1);
-                                            all_item_ids.push_back(id);
-                                        }
-                                    }
-                                } catch (...) {}
+                                    } catch (...) {}
+                                }
                             }
                         }
-                    }
+                    } catch (...) {}
                 }
 
                 // 5. Legendary Armory
@@ -641,6 +699,7 @@ namespace HoardAndSeek {
                     s_item_locations = locations;
                     s_wallet = wallet;
                     s_has_account_data = true;
+                    s_last_updated = std::time(nullptr);
                     s_fetch_status = FetchStatus::Success;
                     int total_entries = (int)all_item_ids.size() + (int)wallet.size();
                     s_fetch_message = "Done (" + std::to_string(all_item_ids.size()) +
@@ -664,6 +723,24 @@ namespace HoardAndSeek {
 
     const std::string& GW2API::GetFetchStatusMessage() {
         return s_fetch_message;
+    }
+
+    time_t GW2API::GetLastUpdated() {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        return s_last_updated;
+    }
+
+    bool GW2API::IsRefreshOnCooldown() {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        if (s_last_updated == 0) return false;
+        return difftime(std::time(nullptr), s_last_updated) < HOARD_REFRESH_COOLDOWN;
+    }
+
+    time_t GW2API::GetRefreshAvailableAt() {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        if (s_last_updated == 0) return 0;
+        time_t available = s_last_updated + HOARD_REFRESH_COOLDOWN;
+        return (std::time(nullptr) >= available) ? 0 : available;
     }
 
     bool GW2API::HasAccountData() {
@@ -790,6 +867,7 @@ namespace HoardAndSeek {
                 };
             }
             j["item_cache"] = cache_json;
+            j["last_updated"] = (int64_t)s_last_updated;
 
             std::ofstream file(path);
             if (!file.is_open()) return false;
@@ -844,6 +922,10 @@ namespace HoardAndSeek {
                     info.type = info_json.value("type", "");
                     s_item_cache[item_id] = info;
                 }
+            }
+
+            if (j.contains("last_updated") && j["last_updated"].is_number()) {
+                s_last_updated = (time_t)j["last_updated"].get<int64_t>();
             }
 
             s_has_account_data = !s_item_locations.empty();
