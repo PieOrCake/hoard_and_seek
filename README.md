@@ -90,9 +90,9 @@ Copy `include/HoardAndSeekAPI.h` into your addon's include path. All communicati
 
 | Event | Payload | Description |
 |---|---|---|
-| `EV_HOARD_DATA_UPDATED` | `HoardDataReadyPayload*` | Account data ready (startup or refresh) |
-| `EV_HOARD_FETCH_PROGRESS` | `HoardFetchProgressPayload*` | Live fetch status message |
-| `EV_HOARD_PONG` | `nullptr` | Response to `EV_HOARD_PING` |
+| `EV_HOARD_DATA_UPDATED` | `HoardDataReadyPayload*` | Raised when account data finishes loading (startup cache or refresh) |
+| `EV_HOARD_FETCH_PROGRESS` | `HoardFetchProgressPayload*` | Raised during an account data fetch with a status message (e.g. "Fetching bank...", "Fetching inventory: Character...") |
+| `EV_HOARD_PONG` | `nullptr` | Raised in response to `EV_HOARD_PING` — confirms H&S is loaded |
 
 Subscribe to `EV_HOARD_DATA_UPDATED` to know when H&S has data available for queries. Subscribe to `EV_HOARD_FETCH_PROGRESS` to show live progress in your addon's UI.
 
@@ -100,13 +100,13 @@ Subscribe to `EV_HOARD_DATA_UPDATED` to know when H&S has data available for que
 
 | Event | Request Payload | Response Payload | Description |
 |---|---|---|---|
-| `EV_HOARD_PING` | `nullptr` | `EV_HOARD_PONG` | Presence check |
-| `EV_HOARD_REFRESH` | `nullptr` | — | Triggers account data refresh |
-| `EV_HOARD_SEARCH` | `const char*` | — | Opens H&S and searches for item |
-| `EV_HOARD_QUERY_ITEM` | `HoardQueryItemRequest*` | `HoardQueryItemResponse*` | Item count + locations (cached) |
-| `EV_HOARD_QUERY_WALLET` | `HoardQueryWalletRequest*` | `HoardQueryWalletResponse*` | Currency balance (cached) |
-| `EV_HOARD_QUERY_ACHIEVEMENT` | `HoardQueryAchievementRequest*` | `HoardQueryAchievementResponse*` | Achievement progress (live proxy) |
-| `EV_HOARD_QUERY_MASTERY` | `HoardQueryMasteryRequest*` | `HoardQueryMasteryResponse*` | Mastery levels (live proxy) |
+| `EV_HOARD_PING` | `nullptr` | `EV_HOARD_PONG` | Checks if H&S is loaded. If it is, H&S immediately responds with `EV_HOARD_PONG`. |
+| `EV_HOARD_REFRESH` | `nullptr` | *(none — triggers refresh)* | Triggers an account data refresh in H&S (same as pressing the button). H&S broadcasts `EV_HOARD_DATA_UPDATED` on completion. |
+| `EV_HOARD_SEARCH` | `const char*` | *(none — opens H&S UI)* | Opens the H&S window and searches for the given item name |
+| `EV_HOARD_QUERY_ITEM` | `HoardQueryItemRequest*` | `HoardQueryItemResponse*` | Returns total count and up to 32 locations for a specific item ID |
+| `EV_HOARD_QUERY_WALLET` | `HoardQueryWalletRequest*` | `HoardQueryWalletResponse*` | Returns wallet currency balance for a specific currency ID |
+| `EV_HOARD_QUERY_ACHIEVEMENT` | `HoardQueryAchievementRequest*` | `HoardQueryAchievementResponse*` | Proxy query: fetches account achievement progress from the GW2 API (batch, up to 200 IDs) |
+| `EV_HOARD_QUERY_MASTERY` | `HoardQueryMasteryRequest*` | `HoardQueryMasteryResponse*` | Proxy query: fetches account mastery levels from the GW2 API (batch, up to 200 IDs) |
 
 ### Request / Response Pattern
 
