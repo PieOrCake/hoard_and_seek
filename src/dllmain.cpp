@@ -11,6 +11,7 @@
 #include "imgui.h"
 #include "GW2API.h"
 #include "IconManager.h"
+#include "PermissionManager.h"
 #include "HoardAndSeekAPI.h"
 #include <nlohmann/json.hpp>
 
@@ -403,14 +404,39 @@ void OnSearchRequest(void* eventArgs) {
     }
 }
 
+// Helper: check permission for a requester/event pair.
+// Returns HOARD_STATUS_OK if allowed, HOARD_STATUS_DENIED if denied,
+// HOARD_STATUS_PENDING if not yet decided (popup queued).
+static uint8_t CheckAddonPermission(const char* requester, const char* event_name) {
+    if (!requester || requester[0] == '\0') return HOARD_STATUS_DENIED;
+    std::string req_str(requester);
+    std::string ev_str(event_name);
+    auto state = HoardAndSeek::PermissionManager::Check(req_str, ev_str);
+    if (state == HoardAndSeek::PermissionState::Allowed) return HOARD_STATUS_OK;
+    if (state == HoardAndSeek::PermissionState::Unknown) {
+        HoardAndSeek::PermissionManager::RequestPermission(req_str, ev_str);
+        return HOARD_STATUS_PENDING;
+    }
+    return HOARD_STATUS_DENIED;
+}
+
 void OnQueryItem(void* eventArgs) {
     if (!eventArgs || !APIDefs) return;
     auto* req = (HoardQueryItemRequest*)eventArgs;
     if (req->api_version != HOARD_API_VERSION) return;
     if (req->response_event[0] == '\0') return;
+    uint8_t perm = CheckAddonPermission(req->requester, EV_HOARD_QUERY_ITEM);
+    if (perm != HOARD_STATUS_OK) {
+        auto* resp = new HoardQueryItemResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = perm;
+        APIDefs->Events_Raise(req->response_event, resp);
+        return;
+    }
 
     auto* resp = new HoardQueryItemResponse{};
     resp->api_version = HOARD_API_VERSION;
+    resp->status = HOARD_STATUS_OK;
     resp->item_id = req->item_id;
     resp->total_count = 0;
     resp->location_count = 0;
@@ -445,9 +471,18 @@ void OnQueryWallet(void* eventArgs) {
     auto* req = (HoardQueryWalletRequest*)eventArgs;
     if (req->api_version != HOARD_API_VERSION) return;
     if (req->response_event[0] == '\0') return;
+    uint8_t perm = CheckAddonPermission(req->requester, EV_HOARD_QUERY_WALLET);
+    if (perm != HOARD_STATUS_OK) {
+        auto* resp = new HoardQueryWalletResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = perm;
+        APIDefs->Events_Raise(req->response_event, resp);
+        return;
+    }
 
     auto* resp = new HoardQueryWalletResponse{};
     resp->api_version = HOARD_API_VERSION;
+    resp->status = HOARD_STATUS_OK;
     resp->currency_id = req->currency_id;
     resp->found = false;
     resp->amount = 0;
@@ -471,6 +506,14 @@ void OnQueryAchievement(void* eventArgs) {
     auto* req = (HoardQueryAchievementRequest*)eventArgs;
     if (req->api_version != HOARD_API_VERSION) return;
     if (req->response_event[0] == '\0' || req->id_count == 0) return;
+    uint8_t perm = CheckAddonPermission(req->requester, EV_HOARD_QUERY_ACHIEVEMENT);
+    if (perm != HOARD_STATUS_OK) {
+        auto* resp = new HoardQueryAchievementResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = perm;
+        APIDefs->Events_Raise(req->response_event, resp);
+        return;
+    }
 
     // Copy request data for the thread
     std::vector<uint32_t> ids(req->ids, req->ids + std::min(req->id_count, (uint32_t)200));
@@ -479,6 +522,7 @@ void OnQueryAchievement(void* eventArgs) {
     std::thread([ids, response_event]() {
         auto* resp = new HoardQueryAchievementResponse{};
         resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_OK;
         resp->entry_count = 0;
 
         // Build comma-separated ID list
@@ -524,6 +568,14 @@ void OnQueryMastery(void* eventArgs) {
     auto* req = (HoardQueryMasteryRequest*)eventArgs;
     if (req->api_version != HOARD_API_VERSION) return;
     if (req->response_event[0] == '\0' || req->id_count == 0) return;
+    uint8_t perm = CheckAddonPermission(req->requester, EV_HOARD_QUERY_MASTERY);
+    if (perm != HOARD_STATUS_OK) {
+        auto* resp = new HoardQueryMasteryResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = perm;
+        APIDefs->Events_Raise(req->response_event, resp);
+        return;
+    }
 
     // Copy request data for the thread
     std::vector<uint32_t> ids(req->ids, req->ids + std::min(req->id_count, (uint32_t)200));
@@ -532,6 +584,7 @@ void OnQueryMastery(void* eventArgs) {
     std::thread([ids, response_event]() {
         auto* resp = new HoardQueryMasteryResponse{};
         resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_OK;
         resp->entry_count = 0;
 
         // /v2/account/masteries returns all masteries; we filter to requested IDs
@@ -559,6 +612,172 @@ void OnQueryMastery(void* eventArgs) {
 
         if (APIDefs) APIDefs->Events_Raise(response_event.c_str(), resp);
         // Caller frees resp
+    }).detach();
+}
+
+void OnQuerySkins(void* eventArgs) {
+    if (!eventArgs || !APIDefs) return;
+    auto* req = (HoardQuerySkinsRequest*)eventArgs;
+    if (req->api_version != HOARD_API_VERSION) return;
+    if (req->response_event[0] == '\0' || req->id_count == 0) return;
+    uint8_t perm = CheckAddonPermission(req->requester, EV_HOARD_QUERY_SKINS);
+    if (perm != HOARD_STATUS_OK) {
+        auto* resp = new HoardQuerySkinsResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = perm;
+        APIDefs->Events_Raise(req->response_event, resp);
+        return;
+    }
+
+    std::vector<uint32_t> ids(req->ids, req->ids + std::min(req->id_count, (uint32_t)200));
+    std::string response_event(req->response_event);
+
+    std::thread([ids, response_event]() {
+        auto* resp = new HoardQuerySkinsResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_OK;
+        resp->entry_count = 0;
+
+        // /v2/account/skins returns all unlocked skin IDs; we filter to requested
+        std::string url = "https://api.guildwars2.com/v2/account/skins";
+        std::string raw = HoardAndSeek::GW2API::AuthenticatedGet(url);
+        std::unordered_set<uint32_t> unlocked;
+        if (!raw.empty()) {
+            try {
+                auto j = nlohmann::json::parse(raw);
+                if (j.is_array()) {
+                    for (const auto& id : j) {
+                        unlocked.insert(id.get<uint32_t>());
+                    }
+                }
+            } catch (...) {}
+        }
+
+        for (size_t i = 0; i < ids.size() && resp->entry_count < 200; i++) {
+            auto& e = resp->entries[resp->entry_count];
+            e.id = ids[i];
+            e.unlocked = unlocked.count(ids[i]) ? 1 : 0;
+            resp->entry_count++;
+        }
+
+        if (APIDefs) APIDefs->Events_Raise(response_event.c_str(), resp);
+    }).detach();
+}
+
+void OnQueryRecipes(void* eventArgs) {
+    if (!eventArgs || !APIDefs) return;
+    auto* req = (HoardQueryRecipesRequest*)eventArgs;
+    if (req->api_version != HOARD_API_VERSION) return;
+    if (req->response_event[0] == '\0' || req->id_count == 0) return;
+    uint8_t perm = CheckAddonPermission(req->requester, EV_HOARD_QUERY_RECIPES);
+    if (perm != HOARD_STATUS_OK) {
+        auto* resp = new HoardQueryRecipesResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = perm;
+        APIDefs->Events_Raise(req->response_event, resp);
+        return;
+    }
+
+    std::vector<uint32_t> ids(req->ids, req->ids + std::min(req->id_count, (uint32_t)200));
+    std::string response_event(req->response_event);
+
+    std::thread([ids, response_event]() {
+        auto* resp = new HoardQueryRecipesResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_OK;
+        resp->entry_count = 0;
+
+        // /v2/account/recipes returns all unlocked recipe IDs; we filter to requested
+        std::string url = "https://api.guildwars2.com/v2/account/recipes";
+        std::string raw = HoardAndSeek::GW2API::AuthenticatedGet(url);
+        std::unordered_set<uint32_t> unlocked;
+        if (!raw.empty()) {
+            try {
+                auto j = nlohmann::json::parse(raw);
+                if (j.is_array()) {
+                    for (const auto& id : j) {
+                        unlocked.insert(id.get<uint32_t>());
+                    }
+                }
+            } catch (...) {}
+        }
+
+        for (size_t i = 0; i < ids.size() && resp->entry_count < 200; i++) {
+            auto& e = resp->entries[resp->entry_count];
+            e.id = ids[i];
+            e.unlocked = unlocked.count(ids[i]) ? 1 : 0;
+            resp->entry_count++;
+        }
+
+        if (APIDefs) APIDefs->Events_Raise(response_event.c_str(), resp);
+    }).detach();
+}
+
+void OnQueryWizardsVault(void* eventArgs) {
+    if (!eventArgs || !APIDefs) return;
+    auto* req = (HoardQueryWizardsVaultRequest*)eventArgs;
+    if (req->api_version != HOARD_API_VERSION) return;
+    if (req->response_event[0] == '\0') return;
+    uint8_t perm = CheckAddonPermission(req->requester, EV_HOARD_QUERY_WIZARDSVAULT);
+    if (perm != HOARD_STATUS_OK) {
+        auto* resp = new HoardQueryWizardsVaultResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = perm;
+        APIDefs->Events_Raise(req->response_event, resp);
+        return;
+    }
+
+    uint8_t type = req->type;
+    std::string response_event(req->response_event);
+
+    std::thread([type, response_event]() {
+        auto* resp = new HoardQueryWizardsVaultResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_OK;
+        resp->type = type;
+        resp->objective_count = 0;
+
+        const char* endpoints[] = {
+            "https://api.guildwars2.com/v2/account/wizardsvault/daily",
+            "https://api.guildwars2.com/v2/account/wizardsvault/weekly",
+            "https://api.guildwars2.com/v2/account/wizardsvault/special"
+        };
+        if (type > 2) {
+            if (APIDefs) APIDefs->Events_Raise(response_event.c_str(), resp);
+            return;
+        }
+
+        std::string raw = HoardAndSeek::GW2API::AuthenticatedGet(endpoints[type]);
+        if (!raw.empty()) {
+            try {
+                auto j = nlohmann::json::parse(raw);
+                resp->meta_progress_current = j.value("meta_progress_current", 0);
+                resp->meta_progress_complete = j.value("meta_progress_complete", 0);
+                resp->meta_reward_astral = j.value("meta_reward_astral", 0);
+                resp->meta_reward_claimed = j.value("meta_reward_claimed", false) ? 1 : 0;
+
+                if (j.contains("objectives") && j["objectives"].is_array()) {
+                    for (const auto& obj : j["objectives"]) {
+                        if (resp->objective_count >= 16) break;
+                        auto& o = resp->objectives[resp->objective_count];
+                        o.id = obj.value("id", (uint32_t)0);
+                        std::string title = obj.value("title", "");
+                        strncpy(o.title, title.c_str(), sizeof(o.title) - 1);
+                        o.title[sizeof(o.title) - 1] = '\0';
+                        std::string track = obj.value("track", "");
+                        strncpy(o.track, track.c_str(), sizeof(o.track) - 1);
+                        o.track[sizeof(o.track) - 1] = '\0';
+                        o.acclaim = obj.value("acclaim", 0);
+                        o.progress_current = obj.value("progress_current", 0);
+                        o.progress_complete = obj.value("progress_complete", 0);
+                        o.claimed = obj.value("claimed", false) ? 1 : 0;
+                        resp->objective_count++;
+                    }
+                }
+            } catch (...) {}
+        }
+
+        if (APIDefs) APIDefs->Events_Raise(response_event.c_str(), resp);
     }).detach();
 }
 
@@ -617,6 +836,7 @@ void AddonLoad(AddonAPI_t* aApi) {
     }
     HoardAndSeek::GW2API::LoadAccountData();
     HoardAndSeek::GW2API::LoadTooltips();
+    HoardAndSeek::PermissionManager::Init();
 
     // Register render functions
     APIDefs->GUI_Register(RT_Render, AddonRender);
@@ -642,6 +862,9 @@ void AddonLoad(AddonAPI_t* aApi) {
     APIDefs->Events_Subscribe(EV_HOARD_REFRESH, OnRefreshRequest);
     APIDefs->Events_Subscribe(EV_HOARD_QUERY_ACHIEVEMENT, OnQueryAchievement);
     APIDefs->Events_Subscribe(EV_HOARD_QUERY_MASTERY, OnQueryMastery);
+    APIDefs->Events_Subscribe(EV_HOARD_QUERY_SKINS, OnQuerySkins);
+    APIDefs->Events_Subscribe(EV_HOARD_QUERY_RECIPES, OnQueryRecipes);
+    APIDefs->Events_Subscribe(EV_HOARD_QUERY_WIZARDSVAULT, OnQueryWizardsVault);
     APIDefs->Events_Subscribe(EV_HOARD_PING, OnPing);
 
     APIDefs->Log(LOGL_INFO, "HoardAndSeek", "Addon loaded successfully");
@@ -656,6 +879,9 @@ void AddonUnload() {
     APIDefs->Events_Unsubscribe(EV_HOARD_REFRESH, OnRefreshRequest);
     APIDefs->Events_Unsubscribe(EV_HOARD_QUERY_ACHIEVEMENT, OnQueryAchievement);
     APIDefs->Events_Unsubscribe(EV_HOARD_QUERY_MASTERY, OnQueryMastery);
+    APIDefs->Events_Unsubscribe(EV_HOARD_QUERY_SKINS, OnQuerySkins);
+    APIDefs->Events_Unsubscribe(EV_HOARD_QUERY_RECIPES, OnQueryRecipes);
+    APIDefs->Events_Unsubscribe(EV_HOARD_QUERY_WIZARDSVAULT, OnQueryWizardsVault);
     APIDefs->Events_Unsubscribe(EV_HOARD_PING, OnPing);
     APIDefs->GUI_DeregisterCloseOnEscape("Hoard & Seek");
     APIDefs->QuickAccess_Remove(QA_ID);
@@ -682,6 +908,9 @@ void ProcessKeybind(const char* aIdentifier, bool aIsRelease) {
 void AddonRender() {
     // Process icon download queue every frame (even when window hidden)
     HoardAndSeek::IconManager::Tick();
+
+    // Render permission popup (always, even if main window is hidden)
+    HoardAndSeek::PermissionManager::RenderPopup();
 
     // Broadcast fetch progress and data-updated events
     {
@@ -953,6 +1182,11 @@ void AddonOptions() {
     ImGui::Separator();
     ImGui::Text("Search Settings:");
     ImGui::SliderInt("Min search length", &g_MinSearchLength, 1, 5);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("Addon Permissions:");
+    HoardAndSeek::PermissionManager::RenderSettings();
 }
 
 // --- Export: GetAddonDef ---

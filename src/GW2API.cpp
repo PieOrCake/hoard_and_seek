@@ -604,7 +604,94 @@ namespace HoardAndSeek {
                     } catch (...) {}
                 }
 
-                // 6. Wallet
+                // 6. Guild Stash (requires 'guilds' permission — skip gracefully if unavailable)
+                {
+                    std::lock_guard<std::mutex> lock(s_mutex);
+                    s_fetch_message = "Fetching guild stash...";
+                }
+                {
+                    // Get guild IDs from /v2/account
+                    std::string acc_url = "https://api.guildwars2.com/v2/account?access_token=" + key;
+                    std::string acc_response = HttpGet(acc_url);
+                    if (!acc_response.empty()) {
+                        try {
+                            json acc = json::parse(acc_response);
+                            if (acc.contains("guilds") && acc["guilds"].is_array()) {
+                                for (const auto& gid : acc["guilds"]) {
+                                    std::string guild_id = gid.get<std::string>();
+
+                                    // Get guild name
+                                    std::string guild_name = "Guild";
+                                    std::string ginfo_url = "https://api.guildwars2.com/v2/guild/" + guild_id + "?access_token=" + key;
+                                    std::string ginfo_resp = HttpGet(ginfo_url);
+                                    if (!ginfo_resp.empty()) {
+                                        try {
+                                            json gi = json::parse(ginfo_resp);
+                                            if (gi.contains("name")) {
+                                                guild_name = gi["name"].get<std::string>();
+                                            }
+                                        } catch (...) {}
+                                    }
+
+                                    {
+                                        std::lock_guard<std::mutex> lock(s_mutex);
+                                        s_fetch_message = "Fetching guild stash: " + guild_name + "...";
+                                    }
+
+                                    // Get stash
+                                    std::string stash_url = "https://api.guildwars2.com/v2/guild/" + guild_id + "/stash?access_token=" + key;
+                                    std::string stash_resp = HttpGet(stash_url);
+                                    if (!stash_resp.empty()) {
+                                        try {
+                                            json stash = json::parse(stash_resp);
+                                            if (stash.is_array()) {
+                                                int tab_num = 0;
+                                                for (const auto& tab : stash) {
+                                                    tab_num++;
+                                                    if (!tab.contains("inventory") || !tab["inventory"].is_array()) continue;
+                                                    for (const auto& slot : tab["inventory"]) {
+                                                        if (slot.is_null() || !slot.contains("id")) continue;
+                                                        uint32_t id = slot["id"].get<uint32_t>();
+                                                        int count = slot.value("count", 1);
+                                                        std::string loc = "Guild: " + guild_name;
+                                                        std::string sub = "Tab " + std::to_string(tab_num);
+                                                        AddItemLocation(locations, id, loc, sub, count);
+                                                        all_item_ids.push_back(id);
+                                                    }
+                                                }
+                                            }
+                                        } catch (...) {}
+                                    }
+                                }
+                            }
+                        } catch (...) {}
+                    }
+                }
+
+                // 7. Trading Post Delivery (requires 'tradingpost' permission — skip gracefully)
+                {
+                    std::lock_guard<std::mutex> lock(s_mutex);
+                    s_fetch_message = "Fetching TP delivery...";
+                }
+                url = "https://api.guildwars2.com/v2/commerce/delivery?access_token=" + key;
+                response = HttpGet(url);
+                if (!response.empty()) {
+                    try {
+                        json j = json::parse(response);
+                        if (j.contains("items") && j["items"].is_array()) {
+                            for (const auto& item : j["items"]) {
+                                if (!item.contains("id")) continue;
+                                uint32_t id = item["id"].get<uint32_t>();
+                                int count = item.value("count", 1);
+                                AddItemLocation(locations, id, "TP Delivery", "", count);
+                                all_item_ids.push_back(id);
+                            }
+                        }
+                        // TP delivery coins handled separately (not an item)
+                    } catch (...) {}
+                }
+
+                // 8. Wallet
                 std::unordered_map<int, int> wallet;
                 {
                     std::lock_guard<std::mutex> lock(s_mutex);
@@ -630,7 +717,7 @@ namespace HoardAndSeek {
                     } catch (...) {}
                 }
 
-                // 7. Fetch currency details (names, icons) from /v2/currencies
+                // 9. Fetch currency details (names, icons) from /v2/currencies
                 if (!currency_ids.empty()) {
                     std::lock_guard<std::mutex> lock(s_mutex);
                     s_fetch_message = "Fetching currency details...";
@@ -676,7 +763,7 @@ namespace HoardAndSeek {
                     }
                 }
 
-                // 8. Fetch item details (names, icons, rarity) for all found items
+                // 10. Fetch item details (names, icons, rarity) for all found items
                 {
                     std::lock_guard<std::mutex> lock(s_mutex);
                     s_fetch_message = "Fetching item details...";

@@ -41,6 +41,7 @@ set(SOURCES
     src/dllmain.cpp
     src/GW2API.cpp
     src/IconManager.cpp
+    src/PermissionManager.cpp
     ${IMGUI_SOURCES}
 )
 
