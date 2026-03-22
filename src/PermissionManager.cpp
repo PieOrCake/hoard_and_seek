@@ -234,50 +234,61 @@ namespace HoardAndSeek {
     }
 
     void PermissionManager::RenderSettings() {
-        std::lock_guard<std::mutex> lock(s_mutex);
+        bool needs_save = false;
 
-        if (s_permissions.empty()) {
-            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "No addon permissions have been set yet.");
-            return;
-        }
+        {
+            std::lock_guard<std::mutex> lock(s_mutex);
 
-        // Collect items to revoke after iteration
-        std::vector<std::pair<std::string, std::string>> to_revoke;
-
-        for (auto& [requester, events] : s_permissions) {
-            if (ImGui::TreeNode(requester.c_str())) {
-                for (auto& [event_name, state] : events) {
-                    const char* desc = GetEventDescription(event_name);
-                    const char* state_str = (state == PermissionState::Allowed) ? "Allowed" : "Denied";
-                    ImVec4 color = (state == PermissionState::Allowed)
-                        ? ImVec4(0.35f, 0.82f, 0.35f, 1.0f)
-                        : ImVec4(0.82f, 0.35f, 0.35f, 1.0f);
-
-                    ImGui::TextColored(color, "[%s]", state_str);
-                    ImGui::SameLine();
-                    ImGui::Text("%s", desc);
-                    ImGui::SameLine();
-                    std::string btn_id = "Revoke##" + requester + event_name;
-                    if (ImGui::SmallButton(btn_id.c_str())) {
-                        to_revoke.push_back({requester, event_name});
-                    }
-                }
-                ImGui::TreePop();
+            if (s_permissions.empty()) {
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "No addon permissions have been set yet.");
+                return;
             }
-        }
 
-        // Apply revocations outside iteration
-        if (!to_revoke.empty()) {
-            for (auto& [req, ev] : to_revoke) {
-                auto it = s_permissions.find(req);
-                if (it != s_permissions.end()) {
-                    it->second.erase(ev);
-                    if (it->second.empty()) {
-                        s_permissions.erase(it);
+            std::string addon_to_remove;
+
+            for (auto& [requester, events] : s_permissions) {
+                bool tree_open = ImGui::TreeNode(requester.c_str());
+
+                // Remove button on same line as tree node
+                ImGui::SameLine();
+                std::string remove_id = "Remove##" + requester;
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.15f, 0.15f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
+                if (ImGui::SmallButton(remove_id.c_str())) {
+                    addon_to_remove = requester;
+                }
+                ImGui::PopStyleColor(2);
+
+                if (tree_open) {
+                    // Show all known events with checkboxes
+                    for (const auto& desc : s_event_descriptions) {
+                        bool allowed = false;
+                        auto ev_it = events.find(desc.event_name);
+                        if (ev_it != events.end()) {
+                            allowed = (ev_it->second == PermissionState::Allowed);
+                        }
+
+                        std::string label = std::string(desc.description) + "##" + requester + desc.event_name;
+                        if (ImGui::Checkbox(label.c_str(), &allowed)) {
+                            events[desc.event_name] = allowed ? PermissionState::Allowed : PermissionState::Denied;
+                            needs_save = true;
+                        }
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(%s)", desc.event_name);
                     }
+                    ImGui::TreePop();
                 }
             }
-            // Save without lock (we already hold it) — defer to after unlock
+
+            // Remove addon outside iteration
+            if (!addon_to_remove.empty()) {
+                s_permissions.erase(addon_to_remove);
+                needs_save = true;
+            }
+        } // lock released
+
+        if (needs_save) {
+            Save();
         }
     }
 
