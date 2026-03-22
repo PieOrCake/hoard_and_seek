@@ -21,6 +21,7 @@ If an LLM creating software upsets you, then perhaps this repo isn't for you. Mo
 
 ![Search results](images/main_window_1.png)
 ![Fetching data](images/main_window_2.png)
+![Permission request](images/permissions.png)
 
 <details>
 <summary><h2>GW2 API Endpoints Used</h2></summary>
