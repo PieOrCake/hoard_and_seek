@@ -965,7 +965,7 @@ extern "C" __declspec(dllexport) AddonDefinition_t* GetAddonDef() {
     AddonDef.Version.Minor = V_MINOR;
     AddonDef.Version.Build = V_BUILD;
     AddonDef.Version.Revision = V_REVISION;
-    AddonDef.Author = "PieOrCake";
+    AddonDef.Author = "PieOrCake.7635";
     AddonDef.Description = "Find where your items are hiding across your GW2 account";
     AddonDef.Load = AddonLoad;
     AddonDef.Unload = AddonUnload;
