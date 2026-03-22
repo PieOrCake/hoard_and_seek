@@ -18,7 +18,7 @@
 // Version constants
 #define V_MAJOR 0
 #define V_MINOR 9
-#define V_BUILD 0
+#define V_BUILD 1
 #define V_REVISION 0
 
 // Quick Access icon identifiers
@@ -103,6 +103,8 @@ static bool g_ShowApiKey = false;
 static std::vector<HoardAndSeek::SearchResult> g_SearchResults;
 static uint32_t g_SelectedItemId = 0;
 static int g_MinSearchLength = 3;
+static bool g_SearchDirty = false;
+static std::chrono::steady_clock::time_point g_SearchLastKeystroke;
 
 // GW2 rarity colors
 static ImVec4 GetRarityColor(const std::string& rarity) {
@@ -1076,11 +1078,26 @@ void AddonRender() {
     ImGui::PopItemWidth();
 
     if (searchChanged) {
-        std::string query(g_SearchFilter);
-        if ((int)query.length() >= g_MinSearchLength) {
-            g_SearchResults = HoardAndSeek::GW2API::SearchItems(query);
-        } else {
+        g_SearchDirty = true;
+        g_SearchLastKeystroke = std::chrono::steady_clock::now();
+        // Clear immediately if below min length
+        if ((int)strlen(g_SearchFilter) < g_MinSearchLength) {
             g_SearchResults.clear();
+            g_SearchDirty = false;
+        }
+    }
+
+    // Debounce: run search 200ms after last keystroke
+    if (g_SearchDirty) {
+        auto elapsed = std::chrono::steady_clock::now() - g_SearchLastKeystroke;
+        if (elapsed >= std::chrono::milliseconds(200)) {
+            g_SearchDirty = false;
+            std::string query(g_SearchFilter);
+            if ((int)query.length() >= g_MinSearchLength) {
+                g_SearchResults = HoardAndSeek::GW2API::SearchItems(query);
+            } else {
+                g_SearchResults.clear();
+            }
         }
     }
 
