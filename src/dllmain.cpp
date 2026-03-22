@@ -970,8 +970,8 @@ extern "C" __declspec(dllexport) AddonDefinition_t* GetAddonDef() {
     AddonDef.Load = AddonLoad;
     AddonDef.Unload = AddonUnload;
     AddonDef.Flags = AF_None;
-    AddonDef.Provider = UP_None;
-    AddonDef.UpdateLink = nullptr;
+    AddonDef.Provider = UP_GitHub;
+    AddonDef.UpdateLink = "https://github.com/PieOrCake/hoard_and_seek";
 
     return &AddonDef;
 }
