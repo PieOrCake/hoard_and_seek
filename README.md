@@ -14,6 +14,11 @@ If an LLM creating software upsets you, then perhaps this repo isn't for you. Mo
 - **Location tracking** — shows exact location: bank tab, material storage, character name + bag number, equipped slot, or shared inventory
 - **Persistent cache** — account data is saved locally so searches work across game sessions
 
+## Screenshots
+
+![Search results](images/main_window_1.png)
+![Fetching data](images/main_window_2.png)
+
 ## GW2 API Endpoints Used
 
 | Endpoint | Purpose |
