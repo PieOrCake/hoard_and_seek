@@ -172,6 +172,8 @@ Permissions are persisted to `permissions.json` in the H&S data directory.
 
 **Important:** The `requester` field must be non-empty. Requests with an empty requester receive `HOARD_STATUS_DENIED`.
 
+> **Security note:** The permission system is a **transparency and consent mechanism**, not a security sandbox. All Nexus addons are DLLs loaded into the same GW2 process and share the same address space and filesystem access. A malicious addon could bypass permissions entirely by reading H&S's data files directly or accessing in-process memory. The real security boundary is which addons you choose to install — only use addons from trusted sources.
+
 ### Example: Query Item Count
 
 ```cpp
