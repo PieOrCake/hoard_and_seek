@@ -322,7 +322,7 @@ Endpoints that return large responses (>32KB) will be truncated — check `resp-
 
 ### Context Menu Hooks
 
-Other addons can register custom right-click context menu items on H&S search results. No permission check is required — this is a UI extension. When the user clicks a registered menu item, H&S raises the addon's specified callback event with item details.
+Other addons can register custom right-click context menu items on H&S search results. Registration requires permission approval (the user sees the standard H&S permission popup). When the user clicks a registered menu item, H&S raises the addon's specified callback event with item details.
 
 ```cpp
 // 1. Subscribe to the callback event
@@ -363,6 +363,8 @@ APIDefs->Events_Raise(EV_HOARD_CONTEXT_MENU_REMOVE, &rem);
 Registered menu items appear below H&S's built-in "Copy Chat Link" option, separated by a divider. Multiple addons can register items simultaneously. If `id` + `requester` match an existing registration, it is updated in place.
 
 **Auto-cleanup:** H&S listens for Nexus `EV_ADDON_UNLOADED` events. When an addon is unloaded or uninstalled, all context menu items registered with that addon's `signature` are automatically removed. Manual removal via `EV_HOARD_CONTEXT_MENU_REMOVE` is still supported but optional.
+
+**Permission note:** If the user hasn't yet approved the permission, the registration is silently skipped and the permission popup is shown. The addon should re-register on next load (the permission will already be approved by then).
 
 ### Version Compatibility
 

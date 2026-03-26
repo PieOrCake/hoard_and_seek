@@ -884,6 +884,8 @@ void OnContextMenuRegister(void* eventArgs) {
     auto* reg = (HoardContextMenuRegister*)eventArgs;
     if (reg->api_version != HOARD_API_VERSION) return;
     if (reg->id[0] == '\0' || reg->requester[0] == '\0' || reg->label[0] == '\0' || reg->callback_event[0] == '\0') return;
+    uint8_t perm = CheckAddonPermission(reg->requester, EV_HOARD_CONTEXT_MENU_REGISTER);
+    if (perm != HOARD_STATUS_OK) return;
 
     ContextMenuItem item;
     item.signature = reg->signature;
