@@ -118,6 +118,7 @@ struct ContextMenuItem {
     uint8_t item_types; // HOARD_MENU_ITEMS, HOARD_MENU_WALLET, HOARD_MENU_ALL
 };
 static std::vector<ContextMenuItem> g_ContextMenuItems;
+static std::vector<ContextMenuItem> g_PendingContextMenuItems; // Awaiting permission approval
 static std::mutex g_ContextMenuMutex;
 
 // GW2 rarity colors
@@ -884,9 +885,6 @@ void OnContextMenuRegister(void* eventArgs) {
     auto* reg = (HoardContextMenuRegister*)eventArgs;
     if (reg->api_version != HOARD_API_VERSION) return;
     if (reg->id[0] == '\0' || reg->requester[0] == '\0' || reg->label[0] == '\0' || reg->callback_event[0] == '\0') return;
-    uint8_t perm = CheckAddonPermission(reg->requester, EV_HOARD_CONTEXT_MENU_REGISTER);
-    if (perm != HOARD_STATUS_OK) return;
-
     ContextMenuItem item;
     item.signature = reg->signature;
     item.id = reg->id;
@@ -894,6 +892,21 @@ void OnContextMenuRegister(void* eventArgs) {
     item.label = reg->label;
     item.callback_event = reg->callback_event;
     item.item_types = reg->item_types ? reg->item_types : HOARD_MENU_ALL;
+
+    uint8_t perm = CheckAddonPermission(reg->requester, EV_HOARD_CONTEXT_MENU_REGISTER);
+    if (perm == HOARD_STATUS_PENDING) {
+        // Queue for later — will be applied when permission is granted
+        std::lock_guard<std::mutex> lock(g_ContextMenuMutex);
+        for (auto& existing : g_PendingContextMenuItems) {
+            if (existing.id == item.id && existing.requester == item.requester) {
+                existing = item;
+                return;
+            }
+        }
+        g_PendingContextMenuItems.push_back(item);
+        return;
+    }
+    if (perm != HOARD_STATUS_OK) return;
 
     std::lock_guard<std::mutex> lock(g_ContextMenuMutex);
     // Replace if same id+requester already exists
@@ -1088,6 +1101,38 @@ void AddonRender() {
 
     // Render permission popup (always, even if main window is hidden)
     HoardAndSeek::PermissionManager::RenderPopup();
+
+    // Flush pending context menu registrations whose permissions were granted
+    {
+        std::lock_guard<std::mutex> lock(g_ContextMenuMutex);
+        auto it = g_PendingContextMenuItems.begin();
+        while (it != g_PendingContextMenuItems.end()) {
+            auto state = HoardAndSeek::PermissionManager::Check(it->requester, EV_HOARD_CONTEXT_MENU_REGISTER);
+            if (state == HoardAndSeek::PermissionState::Allowed) {
+                // Move to active list
+                bool replaced = false;
+                for (auto& existing : g_ContextMenuItems) {
+                    if (existing.id == it->id && existing.requester == it->requester) {
+                        existing = *it;
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced) {
+                    g_ContextMenuItems.push_back(*it);
+                    if (APIDefs) {
+                        std::string msg = "Context menu registered: \"" + it->label + "\" by " + it->requester;
+                        APIDefs->Log(LOGL_INFO, "HoardAndSeek", msg.c_str());
+                    }
+                }
+                it = g_PendingContextMenuItems.erase(it);
+            } else if (state == HoardAndSeek::PermissionState::Denied) {
+                it = g_PendingContextMenuItems.erase(it);
+            } else {
+                ++it; // Still pending
+            }
+        }
+    }
 
     // Broadcast fetch progress and data-updated events
     {
