@@ -5,6 +5,8 @@
 #include <sstream>
 #include <algorithm>
 #include <unordered_set>
+#include <unordered_map>
+#include <mutex>
 #include <thread>
 
 #include "nexus/Nexus.h"
@@ -18,7 +20,7 @@
 // Version constants
 #define V_MAJOR 0
 #define V_MINOR 9
-#define V_BUILD 1
+#define V_BUILD 2
 #define V_REVISION 0
 
 // Quick Access icon identifiers
@@ -105,6 +107,18 @@ static uint32_t g_SelectedItemId = 0;
 static int g_MinSearchLength = 3;
 static bool g_SearchDirty = false;
 static std::chrono::steady_clock::time_point g_SearchLastKeystroke;
+
+// Context menu hooks registered by other addons
+struct ContextMenuItem {
+    uint32_t signature;
+    std::string id;
+    std::string requester;
+    std::string label;
+    std::string callback_event;
+    uint8_t item_types; // HOARD_MENU_ITEMS, HOARD_MENU_WALLET, HOARD_MENU_ALL
+};
+static std::vector<ContextMenuItem> g_ContextMenuItems;
+static std::mutex g_ContextMenuMutex;
 
 // GW2 rarity colors
 static ImVec4 GetRarityColor(const std::string& rarity) {
@@ -316,14 +330,52 @@ static void RenderResultsList() {
                 ImGuiTreeNodeFlags_OpenOnArrow);
             ImGui::PopStyleColor();
 
-            // Right-click context menu: copy chat link (not for wallet currencies)
-            if (result.item_id < HoardAndSeek::WALLET_ID_BASE) {
-                if (ImGui::BeginPopupContextItem("##chatlink_ctx")) {
-                    if (ImGui::MenuItem("Copy Chat Link")) {
-                        std::string link = MakeItemChatLink(result.item_id, result.total_count);
-                        CopyToClipboard(link);
+            // Right-click context menu
+            {
+                bool is_item = result.item_id < HoardAndSeek::WALLET_ID_BASE;
+                uint8_t type_flag = is_item ? HOARD_MENU_ITEMS : HOARD_MENU_WALLET;
+
+                // Check if any registered menu items apply
+                bool has_hooks = false;
+                {
+                    std::lock_guard<std::mutex> lock(g_ContextMenuMutex);
+                    for (const auto& mi : g_ContextMenuItems) {
+                        if (mi.item_types & type_flag) { has_hooks = true; break; }
                     }
-                    ImGui::EndPopup();
+                }
+
+                if (is_item || has_hooks) {
+                    if (ImGui::BeginPopupContextItem("##ctx_menu")) {
+                        if (is_item) {
+                            if (ImGui::MenuItem("Copy Chat Link")) {
+                                std::string link = MakeItemChatLink(result.item_id, result.total_count);
+                                CopyToClipboard(link);
+                            }
+                        }
+
+                        // Registered context menu items from other addons
+                        std::lock_guard<std::mutex> lock(g_ContextMenuMutex);
+                        bool need_separator = is_item && !g_ContextMenuItems.empty();
+                        for (const auto& mi : g_ContextMenuItems) {
+                            if (!(mi.item_types & type_flag)) continue;
+                            if (need_separator) { ImGui::Separator(); need_separator = false; }
+                            if (ImGui::MenuItem(mi.label.c_str())) {
+                                auto* cb = new HoardContextMenuCallback{};
+                                cb->api_version = HOARD_API_VERSION;
+                                cb->item_id = result.item_id;
+                                strncpy(cb->name, result.name.c_str(), sizeof(cb->name) - 1);
+                                cb->name[sizeof(cb->name) - 1] = '\0';
+                                strncpy(cb->rarity, result.rarity.c_str(), sizeof(cb->rarity) - 1);
+                                cb->rarity[sizeof(cb->rarity) - 1] = '\0';
+                                strncpy(cb->type, result.type.c_str(), sizeof(cb->type) - 1);
+                                cb->type[sizeof(cb->type) - 1] = '\0';
+                                cb->total_count = result.total_count;
+                                if (APIDefs) APIDefs->Events_Raise(mi.callback_event.c_str(), cb);
+                            }
+                        }
+
+                        ImGui::EndPopup();
+                    }
                 }
             }
 
@@ -783,6 +835,119 @@ void OnQueryWizardsVault(void* eventArgs) {
     }).detach();
 }
 
+void OnQueryApi(void* eventArgs) {
+    if (!eventArgs || !APIDefs) return;
+    auto* req = (HoardQueryApiRequest*)eventArgs;
+    if (req->api_version != HOARD_API_VERSION) return;
+    if (req->response_event[0] == '\0' || req->endpoint[0] == '\0') return;
+    uint8_t perm = CheckAddonPermission(req->requester, EV_HOARD_QUERY_API);
+    if (perm != HOARD_STATUS_OK) {
+        auto* resp = new HoardQueryApiResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = perm;
+        strncpy(resp->endpoint, req->endpoint, sizeof(resp->endpoint) - 1);
+        resp->endpoint[sizeof(resp->endpoint) - 1] = '\0';
+        APIDefs->Events_Raise(req->response_event, resp);
+        return;
+    }
+
+    std::string endpoint(req->endpoint);
+    std::string response_event(req->response_event);
+
+    std::thread([endpoint, response_event]() {
+        auto* resp = new HoardQueryApiResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_OK;
+        strncpy(resp->endpoint, endpoint.c_str(), sizeof(resp->endpoint) - 1);
+        resp->endpoint[sizeof(resp->endpoint) - 1] = '\0';
+
+        std::string url = "https://api.guildwars2.com" + endpoint;
+        std::string raw = HoardAndSeek::GW2API::AuthenticatedGet(url);
+
+        resp->json_length = (uint32_t)raw.length();
+        if (raw.length() >= sizeof(resp->json)) {
+            resp->truncated = 1;
+            memcpy(resp->json, raw.c_str(), sizeof(resp->json) - 1);
+            resp->json[sizeof(resp->json) - 1] = '\0';
+        } else {
+            resp->truncated = 0;
+            memcpy(resp->json, raw.c_str(), raw.length());
+            resp->json[raw.length()] = '\0';
+        }
+
+        if (APIDefs) APIDefs->Events_Raise(response_event.c_str(), resp);
+    }).detach();
+}
+
+void OnContextMenuRegister(void* eventArgs) {
+    if (!eventArgs) return;
+    auto* reg = (HoardContextMenuRegister*)eventArgs;
+    if (reg->api_version != HOARD_API_VERSION) return;
+    if (reg->id[0] == '\0' || reg->requester[0] == '\0' || reg->label[0] == '\0' || reg->callback_event[0] == '\0') return;
+
+    ContextMenuItem item;
+    item.signature = reg->signature;
+    item.id = reg->id;
+    item.requester = reg->requester;
+    item.label = reg->label;
+    item.callback_event = reg->callback_event;
+    item.item_types = reg->item_types ? reg->item_types : HOARD_MENU_ALL;
+
+    std::lock_guard<std::mutex> lock(g_ContextMenuMutex);
+    // Replace if same id+requester already exists
+    for (auto& existing : g_ContextMenuItems) {
+        if (existing.id == item.id && existing.requester == item.requester) {
+            existing = item;
+            return;
+        }
+    }
+    g_ContextMenuItems.push_back(item);
+
+    if (APIDefs) {
+        std::string msg = "Context menu registered: \"" + item.label + "\" by " + item.requester;
+        APIDefs->Log(LOGL_INFO, "HoardAndSeek", msg.c_str());
+    }
+}
+
+void OnContextMenuRemove(void* eventArgs) {
+    if (!eventArgs) return;
+    auto* rem = (HoardContextMenuRemove*)eventArgs;
+    if (rem->api_version != HOARD_API_VERSION) return;
+    if (rem->requester[0] == '\0') return;
+
+    std::string requester(rem->requester);
+    std::string id(rem->id);
+
+    std::lock_guard<std::mutex> lock(g_ContextMenuMutex);
+    g_ContextMenuItems.erase(
+        std::remove_if(g_ContextMenuItems.begin(), g_ContextMenuItems.end(),
+            [&](const ContextMenuItem& item) {
+                if (item.requester != requester) return false;
+                return id.empty() || item.id == id;
+            }),
+        g_ContextMenuItems.end());
+}
+
+void OnAddonUnloaded(void* eventArgs) {
+    if (!eventArgs) return;
+    uint32_t signature = *(uint32_t*)eventArgs;
+    if (signature == 0) return;
+
+    std::lock_guard<std::mutex> lock(g_ContextMenuMutex);
+    auto before = g_ContextMenuItems.size();
+    g_ContextMenuItems.erase(
+        std::remove_if(g_ContextMenuItems.begin(), g_ContextMenuItems.end(),
+            [signature](const ContextMenuItem& item) {
+                return item.signature == signature;
+            }),
+        g_ContextMenuItems.end());
+
+    if (g_ContextMenuItems.size() < before && APIDefs) {
+        std::string msg = "Removed context menu items for unloaded addon (signature " + std::to_string(signature) + ")";
+        APIDefs->Log(LOGL_INFO, "HoardAndSeek", msg.c_str());
+    }
+}
+
 void OnPing(void* eventArgs) {
     if (!APIDefs) return;
     static HoardPongPayload pong{};
@@ -867,6 +1032,10 @@ void AddonLoad(AddonAPI_t* aApi) {
     APIDefs->Events_Subscribe(EV_HOARD_QUERY_SKINS, OnQuerySkins);
     APIDefs->Events_Subscribe(EV_HOARD_QUERY_RECIPES, OnQueryRecipes);
     APIDefs->Events_Subscribe(EV_HOARD_QUERY_WIZARDSVAULT, OnQueryWizardsVault);
+    APIDefs->Events_Subscribe(EV_HOARD_QUERY_API, OnQueryApi);
+    APIDefs->Events_Subscribe(EV_HOARD_CONTEXT_MENU_REGISTER, OnContextMenuRegister);
+    APIDefs->Events_Subscribe(EV_HOARD_CONTEXT_MENU_REMOVE, OnContextMenuRemove);
+    APIDefs->Events_Subscribe(EV_ADDON_UNLOADED, OnAddonUnloaded);
     APIDefs->Events_Subscribe(EV_HOARD_PING, OnPing);
 
     APIDefs->Log(LOGL_INFO, "HoardAndSeek", "Addon loaded successfully");
@@ -884,6 +1053,10 @@ void AddonUnload() {
     APIDefs->Events_Unsubscribe(EV_HOARD_QUERY_SKINS, OnQuerySkins);
     APIDefs->Events_Unsubscribe(EV_HOARD_QUERY_RECIPES, OnQueryRecipes);
     APIDefs->Events_Unsubscribe(EV_HOARD_QUERY_WIZARDSVAULT, OnQueryWizardsVault);
+    APIDefs->Events_Unsubscribe(EV_HOARD_QUERY_API, OnQueryApi);
+    APIDefs->Events_Unsubscribe(EV_HOARD_CONTEXT_MENU_REGISTER, OnContextMenuRegister);
+    APIDefs->Events_Unsubscribe(EV_HOARD_CONTEXT_MENU_REMOVE, OnContextMenuRemove);
+    APIDefs->Events_Unsubscribe(EV_ADDON_UNLOADED, OnAddonUnloaded);
     APIDefs->Events_Unsubscribe(EV_HOARD_PING, OnPing);
     APIDefs->GUI_DeregisterCloseOnEscape("Hoard & Seek");
     APIDefs->QuickAccess_Remove(QA_ID);

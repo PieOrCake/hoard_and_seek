@@ -97,6 +97,27 @@
 //           with payload HoardQueryWizardsVaultResponse* (caller must free).
 #define EV_HOARD_QUERY_WIZARDSVAULT "EV_HOARD_QUERY_WIZARDSVAULT"
 
+// Generic authenticated API proxy query.
+// Makes any GW2 API endpoint available via H&S's stored API key.
+// Payload: HoardQueryApiRequest*
+// Response: Hoard & Seek raises the event named in `response_event`,
+//           with payload HoardQueryApiResponse* (caller must free).
+#define EV_HOARD_QUERY_API "EV_HOARD_QUERY_API"
+
+// Register a custom right-click context menu item on H&S search results.
+// Payload: HoardContextMenuRegister*
+// No permission check required — this is a UI extension.
+#define EV_HOARD_CONTEXT_MENU_REGISTER "EV_HOARD_CONTEXT_MENU_REGISTER"
+
+// Remove a previously registered context menu item.
+// Payload: HoardContextMenuRemove*
+#define EV_HOARD_CONTEXT_MENU_REMOVE "EV_HOARD_CONTEXT_MENU_REMOVE"
+
+// Context menu item type flags (which result types show this menu item)
+#define HOARD_MENU_ITEMS   1  // Show for regular items
+#define HOARD_MENU_WALLET  2  // Show for wallet currencies
+#define HOARD_MENU_ALL     3  // Show for both
+
 // ============================================================================
 // Payload Structures
 // ============================================================================
@@ -305,6 +326,52 @@ struct HoardQueryWizardsVaultResponse {
     uint8_t meta_reward_claimed;
     uint32_t objective_count;   // Number of objectives returned
     HoardWizardsVaultObjective objectives[16]; // Up to 16 objectives
+};
+
+// Request: generic authenticated API proxy query
+struct HoardQueryApiRequest {
+    uint32_t api_version;       // HOARD_API_VERSION
+    char requester[64];         // Addon name (used for permission checks)
+    char endpoint[256];         // GW2 API path, e.g. "/v2/account/dyes"
+    char response_event[64];    // Event name H&S will raise with the response
+};
+
+// Response: generic API proxy result (raw JSON)
+struct HoardQueryApiResponse {
+    uint32_t api_version;       // HOARD_API_VERSION
+    uint8_t status;             // HOARD_STATUS_OK, HOARD_STATUS_DENIED, or HOARD_STATUS_PENDING
+    char endpoint[256];         // Echo of the requested endpoint
+    uint32_t json_length;       // Actual length of the JSON data (may exceed buffer if truncated)
+    uint8_t truncated;          // 1 if response was truncated to fit buffer, 0 otherwise
+    char json[32768];           // Raw JSON response (up to 32KB, null-terminated)
+};
+
+// Register a custom right-click context menu item
+struct HoardContextMenuRegister {
+    uint32_t api_version;       // HOARD_API_VERSION
+    uint32_t signature;         // Addon's Nexus signature (for auto-cleanup on unload)
+    char id[64];                // Unique ID for this menu entry (for later removal)
+    char requester[64];         // Addon name
+    char label[64];             // Display text in the context menu (e.g. "Add to Watched Items")
+    char callback_event[64];    // Event name H&S raises when clicked (payload: HoardContextMenuCallback*)
+    uint8_t item_types;         // Bitmask: HOARD_MENU_ITEMS, HOARD_MENU_WALLET, or HOARD_MENU_ALL
+};
+
+// Remove a registered context menu item
+struct HoardContextMenuRemove {
+    uint32_t api_version;       // HOARD_API_VERSION
+    char id[64];                // ID of the menu entry to remove (empty = remove all from this requester)
+    char requester[64];         // Addon name
+};
+
+// Callback payload sent when user clicks a registered context menu item
+struct HoardContextMenuCallback {
+    uint32_t api_version;       // HOARD_API_VERSION
+    uint32_t item_id;           // GW2 item ID (or synthetic wallet ID if WALLET_ID_BASE | currency_id)
+    char name[128];             // Item or currency name
+    char rarity[32];            // Item rarity (e.g. "Rare", "Exotic") or "Currency"
+    char type[32];              // Item type (e.g. "Weapon", "Armor") or empty for currencies
+    int32_t total_count;        // Total count across all locations
 };
 
 #pragma pack(pop)

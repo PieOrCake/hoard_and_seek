@@ -139,12 +139,15 @@ Subscribe to `EV_HOARD_DATA_UPDATED` to know when H&S has data available for que
 | `EV_HOARD_QUERY_SKINS` | `HoardQuerySkinsRequest*` | `HoardQuerySkinsResponse*` | Proxy query: checks if specific skin IDs are unlocked (batch, up to 200 IDs) |
 | `EV_HOARD_QUERY_RECIPES` | `HoardQueryRecipesRequest*` | `HoardQueryRecipesResponse*` | Proxy query: checks if specific recipe IDs are unlocked (batch, up to 200 IDs) |
 | `EV_HOARD_QUERY_WIZARDSVAULT` | `HoardQueryWizardsVaultRequest*` | `HoardQueryWizardsVaultResponse*` | Proxy query: fetches Wizard's Vault objectives and progress (type: 0=daily, 1=weekly, 2=special) |
+| `EV_HOARD_QUERY_API` | `HoardQueryApiRequest*` | `HoardQueryApiResponse*` | Generic proxy: forwards any GW2 API endpoint using H&S's stored API key, returns raw JSON |
+| `EV_HOARD_CONTEXT_MENU_REGISTER` | `HoardContextMenuRegister*` | *(none)* | Registers a custom right-click context menu item on H&S search results |
+| `EV_HOARD_CONTEXT_MENU_REMOVE` | `HoardContextMenuRemove*` | *(none)* | Removes a previously registered context menu item |
 
 ### Request / Response Pattern
 
 For query events, you provide a `response_event` name in the request struct. H&S processes the query, then raises that named event with a heap-allocated response payload. **The caller is responsible for freeing the response with `delete`.**
 
-`EV_HOARD_QUERY_ITEM` and `EV_HOARD_QUERY_WALLET` return cached data (fast, synchronous-feeling). `EV_HOARD_QUERY_ACHIEVEMENT`, `EV_HOARD_QUERY_MASTERY`, `EV_HOARD_QUERY_SKINS`, `EV_HOARD_QUERY_RECIPES`, and `EV_HOARD_QUERY_WIZARDSVAULT` are **proxy queries** that make a live API call using H&S's stored API key, so the response is asynchronous with network latency.
+`EV_HOARD_QUERY_ITEM` and `EV_HOARD_QUERY_WALLET` return cached data (fast, synchronous-feeling). `EV_HOARD_QUERY_ACHIEVEMENT`, `EV_HOARD_QUERY_MASTERY`, `EV_HOARD_QUERY_SKINS`, `EV_HOARD_QUERY_RECIPES`, `EV_HOARD_QUERY_WIZARDSVAULT`, and `EV_HOARD_QUERY_API` are **proxy queries** that make a live API call using H&S's stored API key, so the response is asynchronous with network latency.
 
 `HoardDataReadyPayload` includes a `last_updated` field (Unix timestamp) indicating when the account data was last successfully fetched, and a `refresh_available_at` field indicating when the next refresh is allowed (0 if available now). H&S enforces a 5-minute cooldown (`HOARD_REFRESH_COOLDOWN`) between refreshes since the GW2 API does not update instantly. `EV_HOARD_REFRESH` requests during cooldown are silently ignored.
 
@@ -238,6 +241,128 @@ APIDefs->Events_Raise(EV_HOARD_QUERY_ACHIEVEMENT, &req);
 const char* search = "Obsidian";
 APIDefs->Events_Raise("EV_HOARD_SEARCH", (void*)search);
 ```
+
+### Example: Generic API Proxy
+
+The generic proxy (`EV_HOARD_QUERY_API`) makes any authenticated GW2 API endpoint available without needing your own API key. The response contains raw JSON that you parse yourself.
+
+```cpp
+// 1. Subscribe to the response event
+APIDefs->Events_Subscribe("MY_ADDON_API_RESPONSE", [](void* data) {
+    auto* resp = (HoardQueryApiResponse*)data;
+    if (resp->status != HOARD_STATUS_OK) {
+        delete resp;
+        return;
+    }
+    // resp->json contains the raw JSON string
+    // resp->json_length is the original length (check resp->truncated)
+    auto j = nlohmann::json::parse(resp->json);
+    // Process the data...
+    delete resp;
+});
+
+// 2. Send the query
+HoardQueryApiRequest req{};
+req.api_version = HOARD_API_VERSION;
+strncpy(req.requester, "My Addon Name", sizeof(req.requester));
+strncpy(req.endpoint, "/v2/account/dyes", sizeof(req.endpoint));
+strncpy(req.response_event, "MY_ADDON_API_RESPONSE", sizeof(req.response_event));
+APIDefs->Events_Raise(EV_HOARD_QUERY_API, &req);
+```
+
+<details>
+<summary><strong>Available endpoints</strong></summary>
+
+Any authenticated GW2 API endpoint can be used. Common examples:
+
+| Endpoint | Returns |
+|---|---|
+| `/v2/account` | Basic account info |
+| `/v2/account/buildstorage` | Build storage templates |
+| `/v2/account/dailycrafting` | Daily time-gated crafting (completed today) |
+| `/v2/account/dungeons` | Dungeon paths completed today |
+| `/v2/account/dyes` | Unlocked dye IDs |
+| `/v2/account/emotes` | Unlocked emote commands |
+| `/v2/account/finishers` | Unlocked finishers |
+| `/v2/account/gliders` | Unlocked glider IDs |
+| `/v2/account/home/cats` | Home instance cats |
+| `/v2/account/home/nodes` | Home instance nodes |
+| `/v2/account/homestead/decorations` | Homestead decorations |
+| `/v2/account/homestead/glyphs` | Homestead glyphs |
+| `/v2/account/jadebots` | Unlocked jade bot IDs |
+| `/v2/account/luck` | Account luck value |
+| `/v2/account/mailcarriers` | Unlocked mail carrier IDs |
+| `/v2/account/mapchests` | Map chests opened today |
+| `/v2/account/mastery/points` | Mastery point totals per region |
+| `/v2/account/minis` | Unlocked mini IDs |
+| `/v2/account/mounts/skins` | Unlocked mount skin IDs |
+| `/v2/account/mounts/types` | Unlocked mount types |
+| `/v2/account/novelties` | Unlocked novelty IDs |
+| `/v2/account/outfits` | Unlocked outfit IDs |
+| `/v2/account/progression` | Account progression flags |
+| `/v2/account/pvp/heroes` | Unlocked PvP hero IDs |
+| `/v2/account/raids` | Raid encounters cleared this week |
+| `/v2/account/skiffs` | Unlocked skiff skin IDs |
+| `/v2/account/titles` | Unlocked title IDs |
+| `/v2/account/worldbosses` | World bosses killed today |
+| `/v2/account/wizardsvault/listings` | Wizard's Vault shop listings |
+| `/v2/account/wvw` | WvW account data |
+| `/v2/commerce/delivery` | TP delivery box contents |
+| `/v2/commerce/transactions/current/buys` | Current TP buy orders |
+| `/v2/commerce/transactions/current/sells` | Current TP sell orders |
+| `/v2/commerce/transactions/history/buys` | TP buy history |
+| `/v2/commerce/transactions/history/sells` | TP sell history |
+| `/v2/pvp/stats` | PvP win/loss statistics |
+| `/v2/pvp/games` | Recent PvP match history |
+| `/v2/pvp/standings` | PvP league standings |
+
+Endpoints that return large responses (>32KB) will be truncated — check `resp->truncated`. For typed, pre-parsed responses, use the dedicated query events above (item, wallet, achievements, masteries, skins, recipes, Wizard's Vault).
+
+</details>
+
+### Context Menu Hooks
+
+Other addons can register custom right-click context menu items on H&S search results. No permission check is required — this is a UI extension. When the user clicks a registered menu item, H&S raises the addon's specified callback event with item details.
+
+```cpp
+// 1. Subscribe to the callback event
+APIDefs->Events_Subscribe("TP_TRACKER_WATCH_ITEM", [](void* data) {
+    auto* cb = (HoardContextMenuCallback*)data;
+    // cb->item_id, cb->name, cb->rarity, cb->type, cb->total_count
+    AddToWatchList(cb->item_id, cb->name);
+    delete cb; // Caller frees
+});
+
+// 2. Register the context menu item (use your addon's Nexus signature for auto-cleanup)
+HoardContextMenuRegister reg{};
+reg.api_version = HOARD_API_VERSION;
+reg.signature = 0xBEEF; // Your addon's Nexus signature
+strncpy(reg.id, "watch_item", sizeof(reg.id));
+strncpy(reg.requester, "TP Price Tracker", sizeof(reg.requester));
+strncpy(reg.label, "Add to Watched Items", sizeof(reg.label));
+strncpy(reg.callback_event, "TP_TRACKER_WATCH_ITEM", sizeof(reg.callback_event));
+reg.item_types = HOARD_MENU_ITEMS; // Only show for items, not wallet currencies
+APIDefs->Events_Raise(EV_HOARD_CONTEXT_MENU_REGISTER, &reg);
+
+// 3. Remove on unload (optional — pass empty id to remove all from your addon)
+HoardContextMenuRemove rem{};
+rem.api_version = HOARD_API_VERSION;
+strncpy(rem.requester, "TP Price Tracker", sizeof(rem.requester));
+// rem.id left empty = remove all entries from this requester
+APIDefs->Events_Raise(EV_HOARD_CONTEXT_MENU_REMOVE, &rem);
+```
+
+**`item_types` flags:**
+
+| Flag | Value | Effect |
+|---|---|---|
+| `HOARD_MENU_ITEMS` | 1 | Show only for regular items |
+| `HOARD_MENU_WALLET` | 2 | Show only for wallet currencies |
+| `HOARD_MENU_ALL` | 3 | Show for both |
+
+Registered menu items appear below H&S's built-in "Copy Chat Link" option, separated by a divider. Multiple addons can register items simultaneously. If `id` + `requester` match an existing registration, it is updated in place.
+
+**Auto-cleanup:** H&S listens for Nexus `EV_ADDON_UNLOADED` events. When an addon is unloaded or uninstalled, all context menu items registered with that addon's `signature` are automatically removed. Manual removal via `EV_HOARD_CONTEXT_MENU_REMOVE` is still supported but optional.
 
 ### Version Compatibility
 
