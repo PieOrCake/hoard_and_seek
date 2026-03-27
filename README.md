@@ -15,6 +15,8 @@ If an LLM creating software upsets you, then perhaps this repo isn't for you. Mo
 - **Wallet & currency search** — search wallet currencies alongside items
 - **Persistent cache** — account data is saved locally so searches work across game sessions
 - **Cross-addon API** — other addons can query item counts, wallet balances, achievements, masteries, skin/recipe unlocks, and Wizard's Vault progress via Nexus events
+- **Generic API proxy** — other addons can query any authenticated GW2 API endpoint through H&S
+- **Context menu hooks** — other addons can register custom right-click menu items on search results
 - **Permission system** — users control which addons can access their account data
 
 ## Screenshots
@@ -364,7 +366,7 @@ Registered menu items appear below H&S's built-in "Copy Chat Link" option, separ
 
 **Auto-cleanup:** H&S listens for Nexus `EV_ADDON_UNLOADED` events. When an addon is unloaded or uninstalled, all context menu items registered with that addon's `signature` are automatically removed. Manual removal via `EV_HOARD_CONTEXT_MENU_REMOVE` is still supported but optional.
 
-**Permission note:** If the user hasn't yet approved the permission, the registration is silently skipped and the permission popup is shown. The addon should re-register on next load (the permission will already be approved by then).
+**Permission note:** If the user hasn't yet approved the permission, the registration is queued and the permission popup is shown. Once the user approves, queued registrations are applied automatically — no re-registration needed.
 
 ### Version Compatibility
 
