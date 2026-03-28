@@ -147,9 +147,34 @@ Subscribe to `EV_HOARD_DATA_UPDATED` to know when H&S has data available for que
 
 ### Request / Response Pattern
 
-For query events, you provide a `response_event` name in the request struct. H&S processes the query, then raises that named event with a heap-allocated response payload. **The caller is responsible for freeing the response with `delete`.**
+For query events, you provide a `response_event` name in the request struct. H&S processes the query, then raises that named event with a heap-allocated response payload. **You must `delete` the response inside your handler** (see threading notes below).
 
-`EV_HOARD_QUERY_ITEM` and `EV_HOARD_QUERY_WALLET` return cached data (fast, synchronous-feeling). `EV_HOARD_QUERY_ACHIEVEMENT`, `EV_HOARD_QUERY_MASTERY`, `EV_HOARD_QUERY_SKINS`, `EV_HOARD_QUERY_RECIPES`, `EV_HOARD_QUERY_WIZARDSVAULT`, and `EV_HOARD_QUERY_API` are **proxy queries** that make a live API call using H&S's stored API key, so the response is asynchronous with network latency.
+`EV_HOARD_QUERY_ITEM` and `EV_HOARD_QUERY_WALLET` return cached data and respond synchronously (inline). `EV_HOARD_QUERY_ACHIEVEMENT`, `EV_HOARD_QUERY_MASTERY`, `EV_HOARD_QUERY_SKINS`, `EV_HOARD_QUERY_RECIPES`, `EV_HOARD_QUERY_WIZARDSVAULT`, and `EV_HOARD_QUERY_API` are **proxy queries** that make a live API call using H&S's stored API key, so the response arrives asynchronously on a background thread.
+
+### ⚠️ Critical: Synchronous Event Dispatch
+
+**Nexus `Events_Raise` dispatches synchronously.** All subscribers are called inline on the calling thread before `Events_Raise` returns. This has several important consequences:
+
+**Deadlock risk:** If H&S processes your request and raises the response event immediately (as it does for cached queries like `EV_HOARD_QUERY_ITEM` and `EV_HOARD_QUERY_WALLET`, or for `HOARD_STATUS_PENDING`/`HOARD_STATUS_DENIED` responses), your response handler runs *during* your original `Events_Raise` call. If you hold a `std::mutex` when calling `Events_Raise`, and your response handler tries to acquire the same mutex, you will **deadlock**.
+
+```cpp
+// BAD — will deadlock if H&S responds synchronously
+std::lock_guard<std::mutex> lock(myMutex);
+APIDefs->Events_Raise(EV_HOARD_QUERY_ITEM, &req);  // Response handler also locks myMutex → deadlock
+
+// GOOD — release lock before raising
+{
+    std::lock_guard<std::mutex> lock(myMutex);
+    // copy data you need from shared state
+}
+APIDefs->Events_Raise(EV_HOARD_QUERY_ITEM, &req);  // Response handler can safely lock myMutex
+```
+
+**Stack-allocated requests:** Use stack-allocated request structs. H&S reads the request synchronously before `Events_Raise` returns, so the struct can safely go out of scope afterward. Heap allocation is unnecessary.
+
+**Response ownership:** H&S heap-allocates the response and raises your response event. Your handler **must** `delete` the response. Do not attempt to free anything after `Events_Raise` returns — for synchronous responses, the handler has already run and freed it by then.
+
+**Batching & recursion:** If you send batched requests (e.g. querying skins 200 at a time) and your response handler calls `Events_Raise` to send the next batch, this creates a recursive call chain. This is safe as long as no locks are held, but be aware of stack depth (e.g. 10,000 skins / 200 per batch = 50 levels of recursion). Consider queuing the next batch and processing it on the next frame tick instead.
 
 `HoardDataReadyPayload` includes a `last_updated` field (Unix timestamp) indicating when the account data was last successfully fetched, and a `refresh_available_at` field indicating when the next refresh is allowed (0 if available now). H&S enforces a 5-minute cooldown (`HOARD_REFRESH_COOLDOWN`) between refreshes since the GW2 API does not update instantly. `EV_HOARD_REFRESH` requests during cooldown are silently ignored.
 

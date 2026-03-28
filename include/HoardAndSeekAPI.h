@@ -20,6 +20,47 @@
 #define HOARD_STATUS_PENDING  2  // Permission not yet decided (popup shown)
 
 // ============================================================================
+// IMPORTANT: Nexus Event Dispatch Behavior
+// ============================================================================
+//
+// Nexus Events_Raise dispatches SYNCHRONOUSLY. All subscribers are called
+// inline on the calling thread before Events_Raise returns. This includes
+// YOUR OWN response handler if H&S raises the response event during processing.
+//
+// WARNING: DO NOT hold any mutex or non-recursive lock when calling
+// Events_Raise for request events. If your response handler acquires a lock,
+// and you hold that same lock when raising the request, you WILL deadlock.
+//
+// Recommended pattern:
+//   1. Lock mutex, copy out the data you need, unlock mutex
+//   2. Call Events_Raise with no lock held
+//   3. Your response handler can safely acquire the lock
+//
+// REQUEST STRUCTS: Use stack-allocated request structs. H&S reads the request
+// synchronously before Events_Raise returns, so the struct can safely go out
+// of scope afterward. Heap allocation is unnecessary.
+//
+//   HoardQuerySkinsRequest req{};
+//   req.api_version = HOARD_API_VERSION;
+//   strncpy(req.requester, "MyAddon", sizeof(req.requester));
+//   // ... fill fields ...
+//   api->Events_Raise(EV_HOARD_QUERY_SKINS, &req);
+//   // req goes out of scope here — safe, H&S has already read it
+//
+// RESPONSE OWNERSHIP: H&S heap-allocates response payloads and raises your
+// response event synchronously. Your handler is called during the original
+// Events_Raise call. You MUST delete the response inside your handler.
+// Do NOT attempt to free anything after Events_Raise returns — the response
+// has already been delivered and freed by that point.
+//
+// BATCHING & RECURSION: If you send batched requests (e.g. querying skins
+// 200 at a time) and your response handler calls Events_Raise to send the
+// next batch, this creates recursive dispatch. This is safe as long as no
+// locks are held, but be aware of stack depth (e.g. 10000 skins / 200 per
+// batch = 50 levels of recursion). Consider queuing the next batch and
+// processing it on the next frame tick instead.
+//
+// ============================================================================
 // Event Names
 // ============================================================================
 
@@ -55,58 +96,54 @@
 // Payload: const char* (null-terminated item name)
 #define EV_HOARD_SEARCH        "EV_HOARD_SEARCH"
 
+// *** See "Nexus Event Dispatch Behavior" above before using request events. ***
+// *** Do NOT hold locks when calling Events_Raise. Delete responses in your handler. ***
+
 // Query total count + locations for a specific item ID.
-// Payload: HoardQueryItemRequest*
-// Response: Hoard & Seek raises the event named in `response_event`,
-//           with payload HoardQueryItemResponse* (caller must free).
+// Payload: HoardQueryItemRequest* (stack-allocated)
+// Response: H&S raises `response_event` with HoardQueryItemResponse* (delete in handler).
 #define EV_HOARD_QUERY_ITEM    "EV_HOARD_QUERY_ITEM"
 
 // Query wallet currency balance.
-// Payload: HoardQueryWalletRequest*
-// Response: Hoard & Seek raises the event named in `response_event`,
-//           with payload HoardQueryWalletResponse* (caller must free).
+// Payload: HoardQueryWalletRequest* (stack-allocated)
+// Response: H&S raises `response_event` with HoardQueryWalletResponse* (delete in handler).
 #define EV_HOARD_QUERY_WALLET  "EV_HOARD_QUERY_WALLET"
 
 // Query account achievement progress (batch, up to 200 IDs).
-// Payload: HoardQueryAchievementRequest*
-// Response: Hoard & Seek raises the event named in `response_event`,
-//           with payload HoardQueryAchievementResponse* (caller must free).
+// Payload: HoardQueryAchievementRequest* (stack-allocated)
+// Response: H&S raises `response_event` with HoardQueryAchievementResponse* (delete in handler).
 #define EV_HOARD_QUERY_ACHIEVEMENT "EV_HOARD_QUERY_ACHIEVEMENT"
 
 // Query account mastery progress (batch, up to 200 IDs).
-// Payload: HoardQueryMasteryRequest*
-// Response: Hoard & Seek raises the event named in `response_event`,
-//           with payload HoardQueryMasteryResponse* (caller must free).
+// Payload: HoardQueryMasteryRequest* (stack-allocated)
+// Response: H&S raises `response_event` with HoardQueryMasteryResponse* (delete in handler).
 #define EV_HOARD_QUERY_MASTERY "EV_HOARD_QUERY_MASTERY"
 
 // Query account skin unlocks (batch, up to 200 IDs).
-// Payload: HoardQuerySkinsRequest*
-// Response: Hoard & Seek raises the event named in `response_event`,
-//           with payload HoardQuerySkinsResponse* (caller must free).
+// Payload: HoardQuerySkinsRequest* (stack-allocated)
+// Response: H&S raises `response_event` with HoardQuerySkinsResponse* (delete in handler).
 #define EV_HOARD_QUERY_SKINS "EV_HOARD_QUERY_SKINS"
 
 // Query account recipe unlocks (batch, up to 200 IDs).
-// Payload: HoardQueryRecipesRequest*
-// Response: Hoard & Seek raises the event named in `response_event`,
-//           with payload HoardQueryRecipesResponse* (caller must free).
+// Payload: HoardQueryRecipesRequest* (stack-allocated)
+// Response: H&S raises `response_event` with HoardQueryRecipesResponse* (delete in handler).
 #define EV_HOARD_QUERY_RECIPES "EV_HOARD_QUERY_RECIPES"
 
 // Query Wizard's Vault progress (daily, weekly, or special).
-// Payload: HoardQueryWizardsVaultRequest*
-// Response: Hoard & Seek raises the event named in `response_event`,
-//           with payload HoardQueryWizardsVaultResponse* (caller must free).
+// Payload: HoardQueryWizardsVaultRequest* (stack-allocated)
+// Response: H&S raises `response_event` with HoardQueryWizardsVaultResponse* (delete in handler).
 #define EV_HOARD_QUERY_WIZARDSVAULT "EV_HOARD_QUERY_WIZARDSVAULT"
 
 // Generic authenticated API proxy query.
 // Makes any GW2 API endpoint available via H&S's stored API key.
-// Payload: HoardQueryApiRequest*
-// Response: Hoard & Seek raises the event named in `response_event`,
-//           with payload HoardQueryApiResponse* (caller must free).
+// Payload: HoardQueryApiRequest* (stack-allocated)
+// Response: H&S raises `response_event` with HoardQueryApiResponse* (delete in handler).
 #define EV_HOARD_QUERY_API "EV_HOARD_QUERY_API"
 
 // Register a custom right-click context menu item on H&S search results.
-// Payload: HoardContextMenuRegister*
-// No permission check required — this is a UI extension.
+// Payload: HoardContextMenuRegister* (stack-allocated)
+// Requires permission approval. If pending, the registration is queued and
+// applied automatically once the user approves.
 #define EV_HOARD_CONTEXT_MENU_REGISTER "EV_HOARD_CONTEXT_MENU_REGISTER"
 
 // Remove a previously registered context menu item.
