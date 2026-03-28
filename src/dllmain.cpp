@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <mutex>
 #include <thread>
+#include <fstream>
+#include <filesystem>
 
 #include "nexus/Nexus.h"
 #include "imgui.h"
@@ -105,8 +107,32 @@ static bool g_ShowApiKey = false;
 static std::vector<HoardAndSeek::SearchResult> g_SearchResults;
 static uint32_t g_SelectedItemId = 0;
 static int g_MinSearchLength = 3;
+static bool g_ShowQAIcon = true;
 static bool g_SearchDirty = false;
 static std::chrono::steady_clock::time_point g_SearchLastKeystroke;
+
+// Settings persistence
+static void SaveSettings() {
+    std::string dir = HoardAndSeek::GW2API::GetDataDirectory();
+    std::filesystem::create_directories(dir);
+    std::string path = dir + "/settings.json";
+    nlohmann::json j;
+    j["min_search_length"] = g_MinSearchLength;
+    j["show_qa_icon"] = g_ShowQAIcon;
+    std::ofstream file(path);
+    if (file.is_open()) file << j.dump(2);
+}
+
+static void LoadSettings() {
+    std::string path = HoardAndSeek::GW2API::GetDataDirectory() + "/settings.json";
+    std::ifstream file(path);
+    if (!file.is_open()) return;
+    try {
+        auto j = nlohmann::json::parse(file);
+        if (j.contains("min_search_length")) g_MinSearchLength = j["min_search_length"].get<int>();
+        if (j.contains("show_qa_icon")) g_ShowQAIcon = j["show_qa_icon"].get<bool>();
+    } catch (...) {}
+}
 
 // Context menu hooks registered by other addons
 struct ContextMenuItem {
@@ -1031,8 +1057,13 @@ void AddonLoad(AddonAPI_t* aApi) {
     APIDefs->Textures_LoadFromMemory(TEX_ICON, (void*)ICON_SEARCH, ICON_SEARCH_size, nullptr);
     APIDefs->Textures_LoadFromMemory(TEX_ICON_HOVER, (void*)ICON_SEARCH_HOVER, ICON_SEARCH_HOVER_size, nullptr);
 
+    // Load settings
+    LoadSettings();
+
     // Register quick access shortcut
-    APIDefs->QuickAccess_Add(QA_ID, TEX_ICON, TEX_ICON_HOVER, "KB_HOARD_TOGGLE", "Hoard & Seek");
+    if (g_ShowQAIcon) {
+        APIDefs->QuickAccess_Add(QA_ID, TEX_ICON, TEX_ICON_HOVER, "KB_HOARD_TOGGLE", "Hoard & Seek");
+    }
 
     // Register close-on-escape
     APIDefs->GUI_RegisterCloseOnEscape("Hoard & Seek", &g_WindowVisible);
@@ -1078,6 +1109,7 @@ void AddonUnload() {
     APIDefs->GUI_Deregister(AddonOptions);
     APIDefs->GUI_Deregister(AddonRender);
 
+    SaveSettings();
     APIDefs = nullptr;
 }
 
@@ -1419,6 +1451,18 @@ void AddonOptions() {
     ImGui::Separator();
     ImGui::Text("Search Settings:");
     ImGui::SliderInt("Min search length", &g_MinSearchLength, 1, 5);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("UI Settings:");
+    if (ImGui::Checkbox("Show Quick Access icon", &g_ShowQAIcon)) {
+        if (g_ShowQAIcon) {
+            APIDefs->QuickAccess_Add(QA_ID, TEX_ICON, TEX_ICON_HOVER, "KB_HOARD_TOGGLE", "Hoard & Seek");
+        } else {
+            APIDefs->QuickAccess_Remove(QA_ID);
+        }
+        SaveSettings();
+    }
 
     ImGui::Spacing();
     ImGui::Separator();
