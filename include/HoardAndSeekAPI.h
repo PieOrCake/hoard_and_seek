@@ -19,46 +19,68 @@
 #define HOARD_STATUS_DENIED   1  // Permission denied by user
 #define HOARD_STATUS_PENDING  2  // Permission not yet decided (popup shown)
 
+// Permission flow:
+// - First time an addon queries H&S, the user sees a permission popup.
+// - Until the user accepts, all queries return HOARD_STATUS_PENDING.
+// - Once accepted, subsequent queries return HOARD_STATUS_OK.
+// - If denied, queries return HOARD_STATUS_DENIED.
+//
+// Recommended retry pattern for HOARD_STATUS_PENDING:
+// - Do NOT retry immediately or on every frame (this spams Events_Raise).
+// - Wait 2-5 seconds between retry attempts.
+// - Track retry state with a cooldown timer, e.g.:
+//
+//   static auto lastAttempt = std::chrono::steady_clock::time_point{};
+//   auto now = std::chrono::steady_clock::now();
+//   if (now - lastAttempt > std::chrono::seconds(3)) {
+//       lastAttempt = now;
+//       OwnedSkins::RequestOwnedSkins();
+//   }
+//
+// - When the user accepts, the next query will succeed normally.
+// - When the user denies, stop retrying. The user can re-enable later
+//   through H&S settings.
+
 // ============================================================================
-// IMPORTANT: Nexus Event Dispatch Behavior
+// CRITICAL: Threading & Dispatch Model
 // ============================================================================
 //
-// Nexus Events_Raise dispatches SYNCHRONOUSLY. All subscribers are called
-// inline on the calling thread before Events_Raise returns. This includes
-// YOUR OWN response handler if H&S raises the response event during processing.
+// Nexus Events_Raise() dispatches SYNCHRONOUSLY to all subscribers on the
+// calling thread. This has important implications for H&S consumers:
 //
-// WARNING: DO NOT hold any mutex or non-recursive lock when calling
-// Events_Raise for request events. If your response handler acquires a lock,
-// and you hold that same lock when raising the request, you WILL deadlock.
+// 1. When you call Events_Raise(EV_HOARD_QUERY_SKINS, &req), H&S processes
+//    the request and raises your response_event BEFORE Events_Raise returns.
+//    Your response handler runs inline on the same thread, inside the
+//    original Events_Raise call.
 //
-// Recommended pattern:
-//   1. Lock mutex, copy out the data you need, unlock mutex
-//   2. Call Events_Raise with no lock held
-//   3. Your response handler can safely acquire the lock
+// 2. DO NOT hold any lock (mutex, critical section, etc.) when calling
+//    Events_Raise for any request event. If your response handler acquires
+//    the same lock, you WILL deadlock (std::mutex is not recursive).
 //
-// REQUEST STRUCTS: Use stack-allocated request structs. H&S reads the request
-// synchronously before Events_Raise returns, so the struct can safely go out
-// of scope afterward. Heap allocation is unnecessary.
+//    WRONG:
+//      std::lock_guard<std::mutex> lock(myMutex);
+//      api->Events_Raise(EV_HOARD_QUERY_SKINS, &req);  // DEADLOCK
 //
-//   HoardQuerySkinsRequest req{};
-//   req.api_version = HOARD_API_VERSION;
-//   strncpy(req.requester, "MyAddon", sizeof(req.requester));
-//   // ... fill fields ...
-//   api->Events_Raise(EV_HOARD_QUERY_SKINS, &req);
-//   // req goes out of scope here — safe, H&S has already read it
+//    CORRECT:
+//      HoardQuerySkinsRequest req{};
+//      {
+//          std::lock_guard<std::mutex> lock(myMutex);
+//          // ... fill req from shared state ...
+//      } // lock released
+//      api->Events_Raise(EV_HOARD_QUERY_SKINS, &req);  // Safe
 //
-// RESPONSE OWNERSHIP: H&S heap-allocates response payloads and raises your
-// response event synchronously. Your handler is called during the original
-// Events_Raise call. You MUST delete the response inside your handler.
-// Do NOT attempt to free anything after Events_Raise returns — the response
-// has already been delivered and freed by that point.
+// 3. Request structs can be stack-allocated. H&S reads them synchronously
+//    during Events_Raise, so they do not need to outlive the call.
 //
-// BATCHING & RECURSION: If you send batched requests (e.g. querying skins
-// 200 at a time) and your response handler calls Events_Raise to send the
-// next batch, this creates recursive dispatch. This is safe as long as no
-// locks are held, but be aware of stack depth (e.g. 10000 skins / 200 per
-// batch = 50 levels of recursion). Consider queuing the next batch and
-// processing it on the next frame tick instead.
+// 4. Response payloads (e.g. HoardQuerySkinsResponse*) are valid only for
+//    the duration of your event handler callback. Copy any data you need
+//    before returning from the handler, then delete the response.
+//
+// 5. If you batch requests (e.g. querying 10,000 skins in groups of 200)
+//    and your response handler immediately sends the next batch, this
+//    creates recursive Events_Raise calls (one per batch). This works but
+//    be aware of stack depth. For very large queries, consider deferring
+//    the next batch to a frame tick instead.
 //
 // ============================================================================
 // Event Names
@@ -96,48 +118,56 @@
 // Payload: const char* (null-terminated item name)
 #define EV_HOARD_SEARCH        "EV_HOARD_SEARCH"
 
-// *** See "Nexus Event Dispatch Behavior" above before using request events. ***
+// *** See "Threading & Dispatch Model" above before using request events. ***
 // *** Do NOT hold locks when calling Events_Raise. Delete responses in your handler. ***
 
 // Query total count + locations for a specific item ID.
 // Payload: HoardQueryItemRequest* (stack-allocated)
-// Response: H&S raises `response_event` with HoardQueryItemResponse* (delete in handler).
+// Response: H&S raises `response_event` with HoardQueryItemResponse* (delivered synchronously
+//           inside your Events_Raise call; copy needed data, then delete).
 #define EV_HOARD_QUERY_ITEM    "EV_HOARD_QUERY_ITEM"
 
 // Query wallet currency balance.
 // Payload: HoardQueryWalletRequest* (stack-allocated)
-// Response: H&S raises `response_event` with HoardQueryWalletResponse* (delete in handler).
+// Response: H&S raises `response_event` with HoardQueryWalletResponse* (delivered synchronously
+//           inside your Events_Raise call; copy needed data, then delete).
 #define EV_HOARD_QUERY_WALLET  "EV_HOARD_QUERY_WALLET"
 
 // Query account achievement progress (batch, up to 200 IDs).
 // Payload: HoardQueryAchievementRequest* (stack-allocated)
-// Response: H&S raises `response_event` with HoardQueryAchievementResponse* (delete in handler).
+// Response: H&S raises `response_event` with HoardQueryAchievementResponse* (delivered synchronously
+//           inside your Events_Raise call; copy needed data, then delete).
 #define EV_HOARD_QUERY_ACHIEVEMENT "EV_HOARD_QUERY_ACHIEVEMENT"
 
 // Query account mastery progress (batch, up to 200 IDs).
 // Payload: HoardQueryMasteryRequest* (stack-allocated)
-// Response: H&S raises `response_event` with HoardQueryMasteryResponse* (delete in handler).
+// Response: H&S raises `response_event` with HoardQueryMasteryResponse* (delivered synchronously
+//           inside your Events_Raise call; copy needed data, then delete).
 #define EV_HOARD_QUERY_MASTERY "EV_HOARD_QUERY_MASTERY"
 
 // Query account skin unlocks (batch, up to 200 IDs).
 // Payload: HoardQuerySkinsRequest* (stack-allocated)
-// Response: H&S raises `response_event` with HoardQuerySkinsResponse* (delete in handler).
+// Response: H&S raises `response_event` with HoardQuerySkinsResponse* (delivered synchronously
+//           inside your Events_Raise call; copy needed data, then delete).
 #define EV_HOARD_QUERY_SKINS "EV_HOARD_QUERY_SKINS"
 
 // Query account recipe unlocks (batch, up to 200 IDs).
 // Payload: HoardQueryRecipesRequest* (stack-allocated)
-// Response: H&S raises `response_event` with HoardQueryRecipesResponse* (delete in handler).
+// Response: H&S raises `response_event` with HoardQueryRecipesResponse* (delivered synchronously
+//           inside your Events_Raise call; copy needed data, then delete).
 #define EV_HOARD_QUERY_RECIPES "EV_HOARD_QUERY_RECIPES"
 
 // Query Wizard's Vault progress (daily, weekly, or special).
 // Payload: HoardQueryWizardsVaultRequest* (stack-allocated)
-// Response: H&S raises `response_event` with HoardQueryWizardsVaultResponse* (delete in handler).
+// Response: H&S raises `response_event` with HoardQueryWizardsVaultResponse* (delivered synchronously
+//           inside your Events_Raise call; copy needed data, then delete).
 #define EV_HOARD_QUERY_WIZARDSVAULT "EV_HOARD_QUERY_WIZARDSVAULT"
 
 // Generic authenticated API proxy query.
 // Makes any GW2 API endpoint available via H&S's stored API key.
 // Payload: HoardQueryApiRequest* (stack-allocated)
-// Response: H&S raises `response_event` with HoardQueryApiResponse* (delete in handler).
+// Response: H&S raises `response_event` with HoardQueryApiResponse* (delivered synchronously
+//           inside your Events_Raise call; copy needed data, then delete).
 #define EV_HOARD_QUERY_API "EV_HOARD_QUERY_API"
 
 // Register a custom right-click context menu item on H&S search results.
@@ -412,3 +442,31 @@ struct HoardContextMenuCallback {
 };
 
 #pragma pack(pop)
+
+// ============================================================================
+// Minimal Example: Querying skin unlocks
+// ============================================================================
+//
+// // In your response handler (registered via Events_Subscribe):
+// void OnSkinsResponse(void* eventArgs) {
+//     auto* resp = static_cast<HoardQuerySkinsResponse*>(eventArgs);
+//     if (resp->status == HOARD_STATUS_OK) {
+//         std::lock_guard<std::mutex> lock(myMutex);
+//         for (uint32_t i = 0; i < resp->entry_count; i++) {
+//             myUnlocks[resp->entries[i].id] = resp->entries[i].unlocked;
+//         }
+//     }
+//     delete resp;
+// }
+//
+// // Sending a query (NOTE: no lock held!):
+// void QuerySkins(AddonAPI_t* api, const std::vector<uint32_t>& ids) {
+//     HoardQuerySkinsRequest req{};  // Stack-allocated
+//     req.api_version = HOARD_API_VERSION;
+//     strncpy(req.requester, "MyAddon", sizeof(req.requester));
+//     strncpy(req.response_event, "EV_MYADDON_SKINS", sizeof(req.response_event));
+//     req.id_count = std::min(ids.size(), (size_t)200);
+//     for (uint32_t i = 0; i < req.id_count; i++) req.ids[i] = ids[i];
+//     api->Events_Raise(EV_HOARD_QUERY_SKINS, &req);
+//     // Response has ALREADY been delivered to OnSkinsResponse at this point
+// }
