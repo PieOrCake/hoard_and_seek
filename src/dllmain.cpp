@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <shellapi.h>
 #include <string>
 #include <vector>
 #include <cstring>
@@ -23,7 +24,7 @@
 #define V_MAJOR 0
 #define V_MINOR 9
 #define V_BUILD 3
-#define V_REVISION 0
+#define V_REVISION 1
 
 // Quick Access icon identifiers
 #define QA_ID "QA_HOARD_AND_SEEK"
@@ -1365,6 +1366,13 @@ void AddonRender() {
 
 void AddonOptions() {
     ImGui::Text("Hoard & Seek Settings");
+    if (ImGui::SmallButton("Homepage")) {
+        ShellExecuteA(NULL, "open", "https://pie.rocks.cc/", NULL, NULL, SW_SHOWNORMAL);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Buy me a coffee!")) {
+        ShellExecuteA(NULL, "open", "https://ko-fi.com/pieorcake", NULL, NULL, SW_SHOWNORMAL);
+    }
     ImGui::Separator();
 
     // API Key section
