@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <thread>
+#include <atomic>
 #include <fstream>
 #include <filesystem>
 
@@ -24,7 +25,7 @@
 #define V_MAJOR 0
 #define V_MINOR 9
 #define V_BUILD 3
-#define V_REVISION 1
+#define V_REVISION 2
 
 // Quick Access icon identifiers
 #define QA_ID "QA_HOARD_AND_SEEK"
@@ -111,6 +112,9 @@ static int g_MinSearchLength = 3;
 static bool g_ShowQAIcon = true;
 static bool g_SearchDirty = false;
 static std::chrono::steady_clock::time_point g_SearchLastKeystroke;
+static std::vector<HoardAndSeek::SearchResult> g_PendingSearchResults;
+static std::atomic<bool> g_SearchPending{false};
+static std::atomic<bool> g_SearchResultsReady{false};
 
 // Settings persistence
 static void SaveSettings() {
@@ -338,6 +342,18 @@ static void RenderResultsList() {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
+        // Pre-compute context menu hook availability once (not per row)
+        bool has_item_hooks = false;
+        bool has_wallet_hooks = false;
+        {
+            std::lock_guard<std::mutex> lock(g_ContextMenuMutex);
+            for (const auto& mi : g_ContextMenuItems) {
+                if (mi.item_types & HOARD_MENU_ITEMS) has_item_hooks = true;
+                if (mi.item_types & HOARD_MENU_WALLET) has_wallet_hooks = true;
+                if (has_item_hooks && has_wallet_hooks) break;
+            }
+        }
+
         int max_display = 200;
         int count = 0;
         for (const auto& result : g_SearchResults) {
@@ -362,15 +378,7 @@ static void RenderResultsList() {
             {
                 bool is_item = result.item_id < HoardAndSeek::WALLET_ID_BASE;
                 uint8_t type_flag = is_item ? HOARD_MENU_ITEMS : HOARD_MENU_WALLET;
-
-                // Check if any registered menu items apply
-                bool has_hooks = false;
-                {
-                    std::lock_guard<std::mutex> lock(g_ContextMenuMutex);
-                    for (const auto& mi : g_ContextMenuItems) {
-                        if (mi.item_types & type_flag) { has_hooks = true; break; }
-                    }
-                }
+                bool has_hooks = is_item ? has_item_hooks : has_wallet_hooks;
 
                 if (is_item || has_hooks) {
                     if (ImGui::BeginPopupContextItem("##ctx_menu")) {
@@ -1340,18 +1348,30 @@ void AddonRender() {
         }
     }
 
-    // Debounce: run search 200ms after last keystroke
+    // Debounce: dispatch search to background thread 200ms after last keystroke
     if (g_SearchDirty) {
         auto elapsed = std::chrono::steady_clock::now() - g_SearchLastKeystroke;
         if (elapsed >= std::chrono::milliseconds(200)) {
             g_SearchDirty = false;
             std::string query(g_SearchFilter);
-            if ((int)query.length() >= g_MinSearchLength) {
-                g_SearchResults = HoardAndSeek::GW2API::SearchItems(query);
-            } else {
+            if ((int)query.length() >= g_MinSearchLength && !g_SearchPending) {
+                g_SearchPending = true;
+                std::thread([query]() {
+                    auto results = HoardAndSeek::GW2API::SearchItems(query);
+                    g_PendingSearchResults = std::move(results);
+                    g_SearchResultsReady = true;
+                    g_SearchPending = false;
+                }).detach();
+            } else if ((int)query.length() < g_MinSearchLength) {
                 g_SearchResults.clear();
             }
         }
+    }
+
+    // Pick up search results from background thread
+    if (g_SearchResultsReady) {
+        g_SearchResults = std::move(g_PendingSearchResults);
+        g_SearchResultsReady = false;
     }
 
     ImGui::Separator();

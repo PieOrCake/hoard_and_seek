@@ -20,6 +20,7 @@ std::thread IconManager::s_DownloadThread;
 std::condition_variable IconManager::s_QueueCV;
 std::atomic<bool> IconManager::s_StopWorker{false};
 std::vector<uint32_t> IconManager::s_ReadyQueue;
+std::vector<uint32_t> IconManager::s_PendingTexture;
 
 void IconManager::Initialize(AddonAPI_t* api) {
     s_API = api;
@@ -42,6 +43,7 @@ void IconManager::Shutdown() {
     s_LoadingIcons.clear();
     s_ReadyQueue.clear();
     s_RequestQueue.clear();
+    s_PendingTexture.clear();
 }
 
 std::string IconManager::GetIconsDir() {
@@ -134,15 +136,47 @@ bool IconManager::LoadIconFromDisk(uint32_t itemId) {
 void IconManager::Tick() {
     if (!s_API) return;
 
-    // Load any icons that the background worker has downloaded to disk
+    // 1. Load newly downloaded icons from disk (batched)
     std::vector<uint32_t> ready;
     {
         std::lock_guard<std::mutex> lock(s_Mutex);
-        ready.swap(s_ReadyQueue);
+        int count = std::min(TICK_BATCH_SIZE, static_cast<int>(s_ReadyQueue.size()));
+        if (count > 0) {
+            ready.assign(s_ReadyQueue.end() - count, s_ReadyQueue.end());
+            s_ReadyQueue.erase(s_ReadyQueue.end() - count, s_ReadyQueue.end());
+        }
     }
     for (uint32_t itemId : ready) {
         try {
-            LoadIconFromDisk(itemId);
+            if (!LoadIconFromDisk(itemId)) {
+                // Resource not ready yet — queue for re-probe next frame
+                std::lock_guard<std::mutex> lock(s_Mutex);
+                s_PendingTexture.push_back(itemId);
+            }
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(s_Mutex);
+            s_LoadingIcons.erase(itemId);
+            s_FailedIcons[itemId] = std::chrono::steady_clock::now();
+        }
+    }
+
+    // 2. Re-probe pending textures that were submitted to Nexus but not yet ready (batched)
+    std::vector<uint32_t> pending;
+    {
+        std::lock_guard<std::mutex> lock(s_Mutex);
+        int count = std::min(TICK_BATCH_SIZE, static_cast<int>(s_PendingTexture.size()));
+        if (count > 0) {
+            pending.assign(s_PendingTexture.end() - count, s_PendingTexture.end());
+            s_PendingTexture.erase(s_PendingTexture.end() - count, s_PendingTexture.end());
+        }
+    }
+    for (uint32_t itemId : pending) {
+        try {
+            if (!LoadIconFromDisk(itemId)) {
+                // Still not ready — re-queue
+                std::lock_guard<std::mutex> lock(s_Mutex);
+                s_PendingTexture.push_back(itemId);
+            }
         } catch (...) {
             std::lock_guard<std::mutex> lock(s_Mutex);
             s_LoadingIcons.erase(itemId);
@@ -154,51 +188,17 @@ void IconManager::Tick() {
 Texture_t* IconManager::GetIcon(uint32_t itemId) {
     if (!s_API) return nullptr;
 
-    {
-        std::lock_guard<std::mutex> lock(s_Mutex);
-        auto it = s_IconCache.find(itemId);
-        if (it != s_IconCache.end()) {
-            // Validate that the cached texture is still valid
-            if (it->second && it->second->Resource) {
-                return it->second;
-            }
-            // Stale pointer - Nexus may have freed the texture
-            s_IconCache.erase(it);
+    // Cache-only lookup — no Nexus API calls in the render path.
+    // Texture probing is handled by Tick() in batches.
+    std::lock_guard<std::mutex> lock(s_Mutex);
+    auto it = s_IconCache.find(itemId);
+    if (it != s_IconCache.end()) {
+        if (it->second && it->second->Resource) {
+            return it->second;
         }
+        // Stale pointer - Nexus may have freed the texture
+        s_IconCache.erase(it);
     }
-
-    // Check if Nexus has loaded the texture since we requested it
-    std::stringstream ss;
-    ss << "GW2_ICON_" << itemId;
-    std::string identifier = ss.str();
-
-    Texture_t* tex = nullptr;
-    try {
-        tex = s_API->Textures_Get(identifier.c_str());
-    } catch (...) {
-        return nullptr;
-    }
-
-    if (tex) {
-        if (tex->Resource) {
-            // Texture is fully loaded
-            std::lock_guard<std::mutex> lock(s_Mutex);
-            s_IconCache[itemId] = tex;
-            s_LoadingIcons.erase(itemId);
-            s_FailedIcons.erase(itemId);
-            return tex;
-        }
-        // else: Resource not ready yet (still loading) - keep waiting
-    } else {
-        // Texture_Get returned null - request was dropped or never made.
-        // Mark as failed so it won't be re-queued until retry cooldown expires.
-        std::lock_guard<std::mutex> lock(s_Mutex);
-        if (s_LoadingIcons.find(itemId) != s_LoadingIcons.end()) {
-            s_LoadingIcons.erase(itemId);
-            s_FailedIcons[itemId] = std::chrono::steady_clock::now();
-        }
-    }
-
     return nullptr;
 }
 

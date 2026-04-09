@@ -64,6 +64,10 @@ private:
 
     // Ready queue: items downloaded to disk, waiting for render-thread texture load
     static std::vector<uint32_t> s_ReadyQueue;
+
+    // Items submitted to Nexus but whose Resource isn't ready yet — re-probed in batches
+    static std::vector<uint32_t> s_PendingTexture;
+    static const int TICK_BATCH_SIZE = 5;
 };
 
 } // namespace HoardAndSeek
