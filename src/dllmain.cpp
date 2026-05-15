@@ -1490,6 +1490,11 @@ static void PopGW2Theme() {
     }
 }
 
+struct ThemeGuard {
+    ThemeGuard()  { PushGW2Theme(); }
+    ~ThemeGuard() { PopGW2Theme(); }
+};
+
 static void BuildGW2Theme() {
     g_GW2Style = ImGui::GetStyle();
     ImGuiStyle& s = g_GW2Style;
@@ -1607,7 +1612,7 @@ void AddonRender() {
     // Process icon download queue every frame (even when window hidden)
     HoardAndSeek::IconManager::Tick();
 
-    PushGW2Theme();
+    ThemeGuard themeGuard;
 
     // Render permission popup (always, even if main window is hidden)
     HoardAndSeek::PermissionManager::RenderPopup();
@@ -1681,14 +1686,13 @@ void AddonRender() {
         s_prevFetchStatus = curStatus;
     }
 
-    if (!g_WindowVisible) { PopGW2Theme(); return; }
+    if (!g_WindowVisible) return;
 
     ImGui::SetNextWindowSizeConstraints(ImVec2(250, 150), ImVec2(FLT_MAX, FLT_MAX));
     if (!ImGui::Begin("Hoard & Seek", &g_WindowVisible,
         ImGuiWindowFlags_NoCollapse))
     {
         ImGui::End();
-        PopGW2Theme();
         return;
     }
 
@@ -1965,13 +1969,12 @@ void AddonRender() {
     RenderResultsList();
 
     ImGui::End();
-    PopGW2Theme();
 }
 
 // --- Options/Settings Render ---
 
 void AddonOptions() {
-    PushGW2Theme();
+    ThemeGuard themeGuard;
     ImGui::Text("Hoard & Seek Settings");
     if (ImGui::SmallButton("Homepage")) {
         ShellExecuteA(NULL, "open", "https://pie.rocks.cc/", NULL, NULL, SW_SHOWNORMAL);
@@ -2217,7 +2220,6 @@ void AddonOptions() {
     ImGui::Separator();
     ImGui::Text("Addon Permissions:");
     HoardAndSeek::PermissionManager::RenderSettings();
-    PopGW2Theme();
 }
 
 // --- Export: GetAddonDef ---
