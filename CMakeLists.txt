@@ -42,6 +42,7 @@ set(SOURCES
     src/GW2API.cpp
     src/IconManager.cpp
     src/PermissionManager.cpp
+    src/ProxyThrottle.cpp
     ${IMGUI_SOURCES}
 )
 
