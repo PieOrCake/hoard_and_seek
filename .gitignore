@@ -21,3 +21,10 @@ build/
 Thumbs.db
 
 # Dependencies are vendored from Crafty Legend boilerplate (lib/imgui, lib/nlohmann, include/nexus)
+
+# LLM-specific files (instructions, handovers, plans)
+CLAUDE.md
+GEMINI.md
+AGENTS.md
+handover.md
+plans/
