@@ -869,30 +869,64 @@ void OnQueryAchievement(void* eventArgs) {
         return;
     }
 
-    // Copy request data for the thread
     std::vector<uint32_t> ids(req->ids, req->ids + std::min(req->id_count, (uint32_t)200));
     std::string response_event(req->response_event);
     std::string account_name(req->account_name);
+    std::string requester(req->requester);
 
-    std::thread([ids, response_event, account_name]() {
+    // Build comma-separated ID list for URL and cache key
+    std::string ids_param;
+    for (size_t i = 0; i < ids.size(); i++) {
+        if (i > 0) ids_param += ",";
+        ids_param += std::to_string(ids[i]);
+    }
+    std::string cache_endpoint = "/v2/account/achievements?ids=" + ids_param;
+
+    std::string cached;
+    if (HoardAndSeek::ProxyThrottle::CacheLookup(account_name, cache_endpoint, cached)) {
         auto* resp = new HoardQueryAchievementResponse{};
         resp->api_version = HOARD_API_VERSION;
         resp->status = HOARD_STATUS_OK;
         strncpy(resp->account_name, account_name.c_str(), sizeof(resp->account_name) - 1);
         resp->entry_count = 0;
+        try {
+            auto j = nlohmann::json::parse(cached);
+            if (j.is_array()) {
+                for (const auto& entry : j) {
+                    if (resp->entry_count >= 200) break;
+                    auto& e = resp->entries[resp->entry_count];
+                    e.id = entry.value("id", (uint32_t)0);
+                    e.current = entry.value("current", -1);
+                    e.max = entry.value("max", -1);
+                    e.done = entry.value("done", false);
+                    e.bit_count = 0;
+                    if (entry.contains("bits") && entry["bits"].is_array()) {
+                        for (const auto& bit : entry["bits"]) {
+                            if (e.bit_count >= 64) break;
+                            e.bits[e.bit_count++] = bit.get<uint32_t>();
+                        }
+                    }
+                    resp->entry_count++;
+                }
+            }
+        } catch (...) {}
+        APIDefs->Events_Raise(response_event.c_str(), resp);
+        return;
+    }
 
-        // Build comma-separated ID list
-        std::string ids_param;
-        for (size_t i = 0; i < ids.size(); i++) {
-            if (i > 0) ids_param += ",";
-            ids_param += std::to_string(ids[i]);
-        }
-
+    auto fetch = [ids_param, account_name]() -> std::string {
         std::string url = "https://api.guildwars2.com/v2/account/achievements?ids=" + ids_param;
-        std::string raw = HoardAndSeek::GW2API::AuthenticatedGet(url, account_name);
-        if (!raw.empty()) {
+        return HoardAndSeek::GW2API::AuthenticatedGet(url, account_name);
+    };
+    auto complete = [=](const std::string& body) {
+        auto* resp = new HoardQueryAchievementResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_OK;
+        strncpy(resp->account_name, account_name.c_str(), sizeof(resp->account_name) - 1);
+        resp->entry_count = 0;
+        if (!body.empty()) {
             try {
-                auto j = nlohmann::json::parse(raw);
+                auto j = nlohmann::json::parse(body);
                 if (j.is_array()) {
                     for (const auto& entry : j) {
                         if (resp->entry_count >= 200) break;
@@ -913,10 +947,18 @@ void OnQueryAchievement(void* eventArgs) {
                 }
             } catch (...) {}
         }
-
         if (APIDefs) APIDefs->Events_Raise(response_event.c_str(), resp);
-        // Caller frees resp
-    }).detach();
+    };
+
+    auto sr = HoardAndSeek::ProxyThrottle::Submit(
+        requester, account_name, cache_endpoint, std::move(fetch), std::move(complete));
+    if (!sr.accepted) {
+        auto* resp = new HoardQueryAchievementResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_BUSY;
+        strncpy(resp->account_name, account_name.c_str(), sizeof(resp->account_name) - 1);
+        APIDefs->Events_Raise(response_event.c_str(), resp);
+    }
 }
 
 void OnQueryMastery(void* eventArgs) {
@@ -934,26 +976,53 @@ void OnQueryMastery(void* eventArgs) {
         return;
     }
 
-    // Copy request data for the thread
     std::vector<uint32_t> ids(req->ids, req->ids + std::min(req->id_count, (uint32_t)200));
     std::string response_event(req->response_event);
     std::string account_name(req->account_name);
+    std::string requester(req->requester);
+    const std::string cache_endpoint = "/v2/account/masteries";
 
-    std::thread([ids, response_event, account_name]() {
+    std::string cached;
+    if (HoardAndSeek::ProxyThrottle::CacheLookup(account_name, cache_endpoint, cached)) {
         auto* resp = new HoardQueryMasteryResponse{};
         resp->api_version = HOARD_API_VERSION;
         resp->status = HOARD_STATUS_OK;
         strncpy(resp->account_name, account_name.c_str(), sizeof(resp->account_name) - 1);
         resp->entry_count = 0;
+        try {
+            auto j = nlohmann::json::parse(cached);
+            if (j.is_array()) {
+                std::unordered_set<uint32_t> wanted(ids.begin(), ids.end());
+                for (const auto& entry : j) {
+                    if (resp->entry_count >= 200) break;
+                    uint32_t id = entry.value("id", (uint32_t)0);
+                    if (wanted.count(id)) {
+                        auto& e = resp->entries[resp->entry_count];
+                        e.id = id;
+                        e.level = entry.value("level", 0);
+                        resp->entry_count++;
+                    }
+                }
+            }
+        } catch (...) {}
+        APIDefs->Events_Raise(response_event.c_str(), resp);
+        return;
+    }
 
-        // /v2/account/masteries returns all masteries; we filter to requested IDs
-        std::string url = "https://api.guildwars2.com/v2/account/masteries";
-        std::string raw = HoardAndSeek::GW2API::AuthenticatedGet(url, account_name);
-        if (!raw.empty()) {
+    auto fetch = [account_name]() -> std::string {
+        return HoardAndSeek::GW2API::AuthenticatedGet(
+            "https://api.guildwars2.com/v2/account/masteries", account_name);
+    };
+    auto complete = [=](const std::string& body) {
+        auto* resp = new HoardQueryMasteryResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_OK;
+        strncpy(resp->account_name, account_name.c_str(), sizeof(resp->account_name) - 1);
+        resp->entry_count = 0;
+        if (!body.empty()) {
             try {
-                auto j = nlohmann::json::parse(raw);
+                auto j = nlohmann::json::parse(body);
                 if (j.is_array()) {
-                    // Build lookup set
                     std::unordered_set<uint32_t> wanted(ids.begin(), ids.end());
                     for (const auto& entry : j) {
                         if (resp->entry_count >= 200) break;
@@ -968,10 +1037,18 @@ void OnQueryMastery(void* eventArgs) {
                 }
             } catch (...) {}
         }
-
         if (APIDefs) APIDefs->Events_Raise(response_event.c_str(), resp);
-        // Caller frees resp
-    }).detach();
+    };
+
+    auto sr = HoardAndSeek::ProxyThrottle::Submit(
+        requester, account_name, cache_endpoint, std::move(fetch), std::move(complete));
+    if (!sr.accepted) {
+        auto* resp = new HoardQueryMasteryResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_BUSY;
+        strncpy(resp->account_name, account_name.c_str(), sizeof(resp->account_name) - 1);
+        APIDefs->Events_Raise(response_event.c_str(), resp);
+    }
 }
 
 void OnQuerySkins(void* eventArgs) {
@@ -992,38 +1069,59 @@ void OnQuerySkins(void* eventArgs) {
     std::vector<uint32_t> ids(req->ids, req->ids + std::min(req->id_count, (uint32_t)200));
     std::string response_event(req->response_event);
     std::string account_name(req->account_name);
+    std::string requester(req->requester);
+    const std::string cache_endpoint = "/v2/account/skins";
 
-    std::thread([ids, response_event, account_name]() {
+    auto make_resp = [](const std::string& body, const std::vector<uint32_t>& id_list,
+                        const std::string& acct) -> HoardQuerySkinsResponse* {
         auto* resp = new HoardQuerySkinsResponse{};
         resp->api_version = HOARD_API_VERSION;
         resp->status = HOARD_STATUS_OK;
-        strncpy(resp->account_name, account_name.c_str(), sizeof(resp->account_name) - 1);
+        strncpy(resp->account_name, acct.c_str(), sizeof(resp->account_name) - 1);
         resp->entry_count = 0;
-
-        // /v2/account/skins returns all unlocked skin IDs; we filter to requested
-        std::string url = "https://api.guildwars2.com/v2/account/skins";
-        std::string raw = HoardAndSeek::GW2API::AuthenticatedGet(url, account_name);
         std::unordered_set<uint32_t> unlocked;
-        if (!raw.empty()) {
+        if (!body.empty()) {
             try {
-                auto j = nlohmann::json::parse(raw);
+                auto j = nlohmann::json::parse(body);
                 if (j.is_array()) {
-                    for (const auto& id : j) {
-                        unlocked.insert(id.get<uint32_t>());
-                    }
+                    for (const auto& id : j) unlocked.insert(id.get<uint32_t>());
                 }
             } catch (...) {}
         }
-
-        for (size_t i = 0; i < ids.size() && resp->entry_count < 200; i++) {
+        for (size_t i = 0; i < id_list.size() && resp->entry_count < 200; i++) {
             auto& e = resp->entries[resp->entry_count];
-            e.id = ids[i];
-            e.unlocked = unlocked.count(ids[i]) ? 1 : 0;
+            e.id = id_list[i];
+            e.unlocked = unlocked.count(id_list[i]) ? 1 : 0;
             resp->entry_count++;
         }
+        return resp;
+    };
 
+    std::string cached;
+    if (HoardAndSeek::ProxyThrottle::CacheLookup(account_name, cache_endpoint, cached)) {
+        auto* resp = make_resp(cached, ids, account_name);
+        APIDefs->Events_Raise(response_event.c_str(), resp);
+        return;
+    }
+
+    auto fetch = [account_name]() -> std::string {
+        return HoardAndSeek::GW2API::AuthenticatedGet(
+            "https://api.guildwars2.com/v2/account/skins", account_name);
+    };
+    auto complete = [=](const std::string& body) {
+        auto* resp = make_resp(body, ids, account_name);
         if (APIDefs) APIDefs->Events_Raise(response_event.c_str(), resp);
-    }).detach();
+    };
+
+    auto sr = HoardAndSeek::ProxyThrottle::Submit(
+        requester, account_name, cache_endpoint, std::move(fetch), std::move(complete));
+    if (!sr.accepted) {
+        auto* resp = new HoardQuerySkinsResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_BUSY;
+        strncpy(resp->account_name, account_name.c_str(), sizeof(resp->account_name) - 1);
+        APIDefs->Events_Raise(response_event.c_str(), resp);
+    }
 }
 
 void OnQueryRecipes(void* eventArgs) {
@@ -1044,38 +1142,59 @@ void OnQueryRecipes(void* eventArgs) {
     std::vector<uint32_t> ids(req->ids, req->ids + std::min(req->id_count, (uint32_t)200));
     std::string response_event(req->response_event);
     std::string account_name(req->account_name);
+    std::string requester(req->requester);
+    const std::string cache_endpoint = "/v2/account/recipes";
 
-    std::thread([ids, response_event, account_name]() {
+    auto make_resp = [](const std::string& body, const std::vector<uint32_t>& id_list,
+                        const std::string& acct) -> HoardQueryRecipesResponse* {
         auto* resp = new HoardQueryRecipesResponse{};
         resp->api_version = HOARD_API_VERSION;
         resp->status = HOARD_STATUS_OK;
-        strncpy(resp->account_name, account_name.c_str(), sizeof(resp->account_name) - 1);
+        strncpy(resp->account_name, acct.c_str(), sizeof(resp->account_name) - 1);
         resp->entry_count = 0;
-
-        // /v2/account/recipes returns all unlocked recipe IDs; we filter to requested
-        std::string url = "https://api.guildwars2.com/v2/account/recipes";
-        std::string raw = HoardAndSeek::GW2API::AuthenticatedGet(url, account_name);
         std::unordered_set<uint32_t> unlocked;
-        if (!raw.empty()) {
+        if (!body.empty()) {
             try {
-                auto j = nlohmann::json::parse(raw);
+                auto j = nlohmann::json::parse(body);
                 if (j.is_array()) {
-                    for (const auto& id : j) {
-                        unlocked.insert(id.get<uint32_t>());
-                    }
+                    for (const auto& id : j) unlocked.insert(id.get<uint32_t>());
                 }
             } catch (...) {}
         }
-
-        for (size_t i = 0; i < ids.size() && resp->entry_count < 200; i++) {
+        for (size_t i = 0; i < id_list.size() && resp->entry_count < 200; i++) {
             auto& e = resp->entries[resp->entry_count];
-            e.id = ids[i];
-            e.unlocked = unlocked.count(ids[i]) ? 1 : 0;
+            e.id = id_list[i];
+            e.unlocked = unlocked.count(id_list[i]) ? 1 : 0;
             resp->entry_count++;
         }
+        return resp;
+    };
 
+    std::string cached;
+    if (HoardAndSeek::ProxyThrottle::CacheLookup(account_name, cache_endpoint, cached)) {
+        auto* resp = make_resp(cached, ids, account_name);
+        APIDefs->Events_Raise(response_event.c_str(), resp);
+        return;
+    }
+
+    auto fetch = [account_name]() -> std::string {
+        return HoardAndSeek::GW2API::AuthenticatedGet(
+            "https://api.guildwars2.com/v2/account/recipes", account_name);
+    };
+    auto complete = [=](const std::string& body) {
+        auto* resp = make_resp(body, ids, account_name);
         if (APIDefs) APIDefs->Events_Raise(response_event.c_str(), resp);
-    }).detach();
+    };
+
+    auto sr = HoardAndSeek::ProxyThrottle::Submit(
+        requester, account_name, cache_endpoint, std::move(fetch), std::move(complete));
+    if (!sr.accepted) {
+        auto* resp = new HoardQueryRecipesResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_BUSY;
+        strncpy(resp->account_name, account_name.c_str(), sizeof(resp->account_name) - 1);
+        APIDefs->Events_Raise(response_event.c_str(), resp);
+    }
 }
 
 void OnQueryWizardsVault(void* eventArgs) {
@@ -1096,34 +1215,40 @@ void OnQueryWizardsVault(void* eventArgs) {
     uint8_t type = req->type;
     std::string response_event(req->response_event);
     std::string account_name(req->account_name);
+    std::string requester(req->requester);
 
-    std::thread([type, response_event, account_name]() {
+    // Validate type up front
+    if (type > 2) {
         auto* resp = new HoardQueryWizardsVaultResponse{};
         resp->api_version = HOARD_API_VERSION;
         resp->status = HOARD_STATUS_OK;
         strncpy(resp->account_name, account_name.c_str(), sizeof(resp->account_name) - 1);
         resp->type = type;
         resp->objective_count = 0;
+        APIDefs->Events_Raise(response_event.c_str(), resp);
+        return;
+    }
 
-        const char* endpoints[] = {
-            "https://api.guildwars2.com/v2/account/wizardsvault/daily",
-            "https://api.guildwars2.com/v2/account/wizardsvault/weekly",
-            "https://api.guildwars2.com/v2/account/wizardsvault/special"
-        };
-        if (type > 2) {
-            if (APIDefs) APIDefs->Events_Raise(response_event.c_str(), resp);
-            return;
-        }
+    const char* type_strings[] = { "daily", "weekly", "special" };
+    std::string type_string = type_strings[type];
+    std::string cache_endpoint = "/v2/account/wizardsvault/" + type_string;
+    std::string url = "https://api.guildwars2.com" + cache_endpoint;
 
-        std::string raw = HoardAndSeek::GW2API::AuthenticatedGet(endpoints[type], account_name);
-        if (!raw.empty()) {
+    auto parse_body = [](const std::string& body, uint8_t t,
+                         const std::string& acct) -> HoardQueryWizardsVaultResponse* {
+        auto* resp = new HoardQueryWizardsVaultResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_OK;
+        strncpy(resp->account_name, acct.c_str(), sizeof(resp->account_name) - 1);
+        resp->type = t;
+        resp->objective_count = 0;
+        if (!body.empty()) {
             try {
-                auto j = nlohmann::json::parse(raw);
+                auto j = nlohmann::json::parse(body);
                 resp->meta_progress_current = j.value("meta_progress_current", 0);
                 resp->meta_progress_complete = j.value("meta_progress_complete", 0);
                 resp->meta_reward_astral = j.value("meta_reward_astral", 0);
                 resp->meta_reward_claimed = j.value("meta_reward_claimed", false) ? 1 : 0;
-
                 if (j.contains("objectives") && j["objectives"].is_array()) {
                     for (const auto& obj : j["objectives"]) {
                         if (resp->objective_count >= 16) break;
@@ -1144,9 +1269,34 @@ void OnQueryWizardsVault(void* eventArgs) {
                 }
             } catch (...) {}
         }
+        return resp;
+    };
 
+    std::string cached;
+    if (HoardAndSeek::ProxyThrottle::CacheLookup(account_name, cache_endpoint, cached)) {
+        auto* resp = parse_body(cached, type, account_name);
+        APIDefs->Events_Raise(response_event.c_str(), resp);
+        return;
+    }
+
+    auto fetch = [url, account_name]() -> std::string {
+        return HoardAndSeek::GW2API::AuthenticatedGet(url, account_name);
+    };
+    auto complete = [=](const std::string& body) {
+        auto* resp = parse_body(body, type, account_name);
         if (APIDefs) APIDefs->Events_Raise(response_event.c_str(), resp);
-    }).detach();
+    };
+
+    auto sr = HoardAndSeek::ProxyThrottle::Submit(
+        requester, account_name, cache_endpoint, std::move(fetch), std::move(complete));
+    if (!sr.accepted) {
+        auto* resp = new HoardQueryWizardsVaultResponse{};
+        resp->api_version = HOARD_API_VERSION;
+        resp->status = HOARD_STATUS_BUSY;
+        strncpy(resp->account_name, account_name.c_str(), sizeof(resp->account_name) - 1);
+        resp->type = type;
+        APIDefs->Events_Raise(response_event.c_str(), resp);
+    }
 }
 
 void OnQueryApi(void* eventArgs) {
