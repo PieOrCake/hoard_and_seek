@@ -1,5 +1,6 @@
 #include "GW2API.h"
 #include "HoardAndSeekAPI.h"
+#include "ProxyThrottle.h"
 
 #include <windows.h>
 #include <wininet.h>
@@ -97,6 +98,7 @@ namespace HoardAndSeek {
 
     // HTTP GET using WinINet
     std::string GW2API::HttpGet(const std::string& url) {
+        HoardAndSeek::ProxyThrottle::AcquireToken();
         HINTERNET hInternet = InternetOpenA("HoardAndSeek/1.0",
             INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
         if (!hInternet) return "";
@@ -105,7 +107,15 @@ namespace HoardAndSeek {
                       INTERNET_FLAG_SECURE | INTERNET_FLAG_IGNORE_CERT_CN_INVALID;
 
         HINTERNET hUrl = InternetOpenUrlA(hInternet, url.c_str(), NULL, 0, flags, 0);
-        if (!hUrl) {
+        if (!hUrl) { InternetCloseHandle(hInternet); return ""; }
+
+        DWORD statusCode = 0;
+        DWORD statusSize = sizeof(statusCode);
+        HttpQueryInfoA(hUrl, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER,
+                       &statusCode, &statusSize, NULL);
+        if (statusCode == 429) {
+            HoardAndSeek::ProxyThrottle::NotifyRateLimited();
+            InternetCloseHandle(hUrl);
             InternetCloseHandle(hInternet);
             return "";
         }
@@ -123,6 +133,7 @@ namespace HoardAndSeek {
     }
 
     GW2API::HttpResponse GW2API::HttpGetEx(const std::string& url) {
+        HoardAndSeek::ProxyThrottle::AcquireToken();
         HttpResponse result;
         HINTERNET hInternet = InternetOpenA("HoardAndSeek/1.0",
             INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
@@ -132,17 +143,16 @@ namespace HoardAndSeek {
                       INTERNET_FLAG_SECURE | INTERNET_FLAG_IGNORE_CERT_CN_INVALID;
 
         HINTERNET hUrl = InternetOpenUrlA(hInternet, url.c_str(), NULL, 0, flags, 0);
-        if (!hUrl) {
-            InternetCloseHandle(hInternet);
-            return result;
-        }
+        if (!hUrl) { InternetCloseHandle(hInternet); return result; }
 
-        // Query HTTP status code
         DWORD statusCode = 0;
         DWORD statusSize = sizeof(statusCode);
         HttpQueryInfoA(hUrl, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER,
                        &statusCode, &statusSize, NULL);
         result.status_code = (int)statusCode;
+        if (statusCode == 429) {
+            HoardAndSeek::ProxyThrottle::NotifyRateLimited();
+        }
 
         char buffer[8192];
         DWORD bytesRead;
