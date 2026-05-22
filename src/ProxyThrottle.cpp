@@ -7,6 +7,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
+#include <unordered_map>
 
 extern AddonAPI_t* APIDefs;
 
@@ -63,6 +64,25 @@ namespace {
             g_last_refill = now;
         }
     }
+
+    struct CacheEntry {
+        std::string body;
+        std::chrono::steady_clock::time_point expires_at;
+    };
+    std::mutex g_cache_mutex;
+    std::unordered_map<std::string, CacheEntry> g_cache;
+
+    std::string CacheKey(const std::string& account_name, const std::string& endpoint) {
+        return account_name + "|" + endpoint;
+    }
+
+    void EvictExpiredLocked() {
+        auto now = std::chrono::steady_clock::now();
+        for (auto it = g_cache.begin(); it != g_cache.end(); ) {
+            if (it->second.expires_at <= now) it = g_cache.erase(it);
+            else ++it;
+        }
+    }
 }
 
 void AcquireToken() {
@@ -100,8 +120,40 @@ double CurrentRefillRate() {
 // --- Stubs (implemented in later tasks) ---
 void Start() {}
 void Stop() {}
-bool CacheLookup(const std::string&, const std::string&, std::string&) { return false; }
-void CacheStore(const std::string&, const std::string&, const std::string&) {}
+
+bool CacheLookup(const std::string& account_name,
+                 const std::string& endpoint,
+                 std::string& out) {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    auto it = g_cache.find(CacheKey(account_name, endpoint));
+    if (it == g_cache.end()) return false;
+    if (it->second.expires_at <= std::chrono::steady_clock::now()) {
+        g_cache.erase(it);
+        return false;
+    }
+    out = it->second.body;
+    return true;
+}
+
+void CacheStore(const std::string& account_name,
+                const std::string& endpoint,
+                const std::string& body) {
+    if (body.empty()) return;
+    if (body.size() > 0 && body[0] == '<') return; // HTML error page - skip
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    EvictExpiredLocked();
+    if (g_cache.size() >= CACHE_MAX_ENTRIES) {
+        auto oldest = g_cache.begin();
+        for (auto it = g_cache.begin(); it != g_cache.end(); ++it) {
+            if (it->second.expires_at < oldest->second.expires_at) oldest = it;
+        }
+        g_cache.erase(oldest);
+    }
+    g_cache[CacheKey(account_name, endpoint)] = CacheEntry{
+        body,
+        std::chrono::steady_clock::now() + std::chrono::seconds(CACHE_TTL_SECONDS)
+    };
+}
 SubmitResult Submit(const std::string&, const std::string&, const std::string&,
                     std::function<std::string()>,
                     std::function<void(const std::string&)>) {
