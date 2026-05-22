@@ -22,6 +22,10 @@ make
 
 Output: `build/HoardAndSeek.dll`
 
+**Always rebuild the DLL after making code changes.** Run `cd build && make` automatically — do not leave it to the user.
+
+**Never bump the addon version** unless the user explicitly asks. Plans and implementations should leave the version constant alone; the user decides when to bump.
+
 There is no test suite. Verification is done by loading the DLL into GW2 via Nexus.
 
 ## Architecture
