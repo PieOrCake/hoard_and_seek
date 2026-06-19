@@ -18,13 +18,14 @@ Hoard & Seek (H&S) is a Guild Wars 2 Nexus addon that fetches and caches account
 Copy `HoardAndSeekAPI.h` into your project. It defines all event names, payload structs, and constants. No linking required.
 
 ### 2. API version
-Set `api_version = HOARD_API_VERSION` (currently 3) in every request struct. H&S rejects requests with `api_version > HOARD_API_VERSION` or `api_version == 0`.
+Set `api_version = HOARD_API_VERSION` (currently 4) in every request struct. H&S rejects requests with `api_version > HOARD_API_VERSION` or `api_version == 0`.
 
-### 3. Permission system
-The first time your addon queries H&S, the user sees a permission popup. Handle three status codes:
+### 3. Permissions (no approval step)
+Access is default-allow: your addon's first query succeeds immediately — there is no permission popup or approval to wait for. Just set a non-empty `requester` name and check the status code:
 - `HOARD_STATUS_OK (0)` — request succeeded
-- `HOARD_STATUS_DENIED (1)` — user denied permission; stop retrying
-- `HOARD_STATUS_PENDING (2)` — popup shown, not yet decided; retry after 2-5 seconds
+- `HOARD_STATUS_DENIED (1)` — user has explicitly denied your addon in H&S settings; stop retrying
+- `HOARD_STATUS_PENDING (2)` — deprecated, never returned anymore (kept for compatibility)
+- `HOARD_STATUS_BUSY (3)` — proxy queue full; retry after `retry_after_ms`
 
 ### 4. Threading model (CRITICAL)
 `Events_Raise()` is **synchronous**. Your response handler runs inline, on the same thread, inside the `Events_Raise` call.

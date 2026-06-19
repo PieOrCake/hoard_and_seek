@@ -51,7 +51,7 @@ For query events, you provide a `response_event` name in the request struct. H&S
 
 **Nexus `Events_Raise` dispatches synchronously.** All subscribers are called inline on the calling thread before `Events_Raise` returns. This has several important consequences:
 
-**Deadlock risk:** If H&S processes your request and raises the response event immediately (as it does for cached queries like `EV_HOARD_QUERY_ITEM` and `EV_HOARD_QUERY_WALLET`, or for `HOARD_STATUS_PENDING`/`HOARD_STATUS_DENIED` responses), your response handler runs *during* your original `Events_Raise` call. If you hold a `std::mutex` when calling `Events_Raise`, and your response handler tries to acquire the same mutex, you will **deadlock**.
+**Deadlock risk:** If H&S processes your request and raises the response event immediately (as it does for cached queries like `EV_HOARD_QUERY_ITEM` and `EV_HOARD_QUERY_WALLET`, or for `HOARD_STATUS_DENIED` responses), your response handler runs *during* your original `Events_Raise` call. If you hold a `std::mutex` when calling `Events_Raise`, and your response handler tries to acquire the same mutex, you will **deadlock**.
 
 ```cpp
 // BAD — will deadlock if H&S responds synchronously
@@ -76,29 +76,28 @@ APIDefs->Events_Raise(EV_HOARD_QUERY_ITEM, &req);  // Response handler can safel
 
 ## Addon Permissions
 
-All query request structs include a `requester` field (64-char addon name). H&S uses this to enforce per-addon, per-event permissions:
+All query request structs include a `requester` field (64-char addon name). Access is **default-allow** — no permission request or approval step is required:
 
-![Permission request dialog](screenshots/permissions.png)
-
-- **First request from a new addon:** H&S shows an in-game popup listing all requested permissions with checkboxes. The user can approve or deny each individually before confirming.
-- **Allowed:** Future requests from that addon for that event proceed normally (`status = HOARD_STATUS_OK`).
-- **Denied:** H&S sends an empty response with `status = HOARD_STATUS_DENIED`.
-- **Pending:** While the popup is waiting for user input, H&S sends an empty response with `status = HOARD_STATUS_PENDING`.
-- **Manage permissions:** The user can view, revoke, or change addon permissions in the H&S settings panel under "Addon Permissions".
+- **First request from a new addon:** succeeds immediately (`status = HOARD_STATUS_OK`). No popup is shown and no prior approval is needed. The addon is recorded so it appears in the H&S settings panel.
+- **Denied:** if the user has explicitly unticked an addon in settings, its requests return `status = HOARD_STATUS_DENIED`.
+- **Manage permissions:** The user can view and deny (or re-allow) addons in the H&S settings panel under "Addon Permissions".
 
 All response structs include a `status` field. Check it before using the response data:
 
 | Status | Value | Meaning |
 |---|---|---|
 | `HOARD_STATUS_OK` | 0 | Request succeeded, response data is valid |
-| `HOARD_STATUS_DENIED` | 1 | Permission denied by user |
-| `HOARD_STATUS_PENDING` | 2 | Permission not yet decided (popup shown to user) |
+| `HOARD_STATUS_DENIED` | 1 | User has explicitly denied this addon in settings |
+| `HOARD_STATUS_PENDING` | 2 | Deprecated — no longer returned (kept for ABI compatibility) |
+| `HOARD_STATUS_BUSY` | 3 | Proxy queue full or per-addon limit reached; retry after `retry_after_ms` |
 
-Permissions are persisted to `permissions.json` in the H&S data directory.
+Denials are persisted to `permissions.json` in the H&S data directory.
 
 **Important:** The `requester` field must be non-empty. Requests with an empty requester receive `HOARD_STATUS_DENIED`.
 
-> **Security note:** The permission system is a **transparency and consent mechanism**, not a security sandbox. All Nexus addons are DLLs loaded into the same GW2 process and share the same address space and filesystem access. A malicious addon could bypass permissions entirely by reading H&S's data files directly or accessing in-process memory. The real security boundary is which addons you choose to install — only use addons from trusted sources.
+> **Note on `HOARD_STATUS_PENDING`:** Earlier versions showed an approval popup and returned `HOARD_STATUS_PENDING` until the user decided. That step has been removed; the status code remains defined only so existing callers that branch on it still compile and run. It is never returned anymore.
+
+> **Security note:** Addon permissions are a **transparency and consent mechanism**, not a security sandbox. All Nexus addons are DLLs loaded into the same GW2 process and share the same address space and filesystem access. A malicious addon could read H&S's data files directly or access in-process memory regardless. The real security boundary is which addons you choose to install — only use addons from trusted sources.
 
 ## Examples
 
@@ -111,8 +110,7 @@ Permissions are persisted to `permissions.json` in the H&S data directory.
 APIDefs->Events_Subscribe("MY_ADDON_ITEM_RESPONSE", [](void* data) {
     auto* resp = (HoardQueryItemResponse*)data;
     if (resp->status != HOARD_STATUS_OK) {
-        // HOARD_STATUS_PENDING = user hasn't decided yet, retry later
-        // HOARD_STATUS_DENIED = user denied this permission
+        // HOARD_STATUS_DENIED = user has denied this addon in H&S settings
         delete resp;
         return;
     }
@@ -247,7 +245,7 @@ Endpoints that return large responses (>64KB) will be truncated — check `resp-
 
 ### Context Menu Hooks
 
-Other addons can register custom right-click context menu items on H&S search results. Registration requires permission approval (the user sees the standard H&S permission popup). When the user clicks a registered menu item, H&S raises the addon's specified callback event with item details.
+Other addons can register custom right-click context menu items on H&S search results. Registration succeeds immediately — no permission approval step is required (unless the user has explicitly denied the addon in settings). When the user clicks a registered menu item, H&S raises the addon's specified callback event with item details.
 
 ```cpp
 // 1. Subscribe to the callback event
@@ -289,7 +287,7 @@ Registered menu items appear below H&S's built-in "Copy Chat Link" option, separ
 
 **Auto-cleanup:** H&S listens for Nexus `EV_ADDON_UNLOADED` events. When an addon is unloaded or uninstalled, all context menu items registered with that addon's `signature` are automatically removed. Manual removal via `EV_HOARD_CONTEXT_MENU_REMOVE` is still supported but optional.
 
-**Permission note:** If the user hasn't yet approved the permission, the registration is queued and the permission popup is shown. Once the user approves, queued registrations are applied automatically — no re-registration needed.
+**Permission note:** Registration is allowed by default and applied right away. It only fails if the user has explicitly denied this addon's context-menu permission in the H&S settings panel.
 
 ## Version Compatibility
 

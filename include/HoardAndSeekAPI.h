@@ -17,30 +17,16 @@
 // Response status codes
 #define HOARD_STATUS_OK       0  // Request succeeded
 #define HOARD_STATUS_DENIED   1  // Permission denied by user
-#define HOARD_STATUS_PENDING  2  // Permission not yet decided (popup shown)
+#define HOARD_STATUS_PENDING  2  // Deprecated: no longer returned (default-allow). Kept for ABI compatibility.
 #define HOARD_STATUS_BUSY     3  // v4+: proxy queue full or per-addon limit reached; retry after retry_after_ms
 
 // Permission flow:
-// - First time an addon queries H&S, the user sees a permission popup.
-// - Until the user accepts, all queries return HOARD_STATUS_PENDING.
-// - Once accepted, subsequent queries return HOARD_STATUS_OK.
-// - If denied, queries return HOARD_STATUS_DENIED.
-//
-// Recommended retry pattern for HOARD_STATUS_PENDING:
-// - Do NOT retry immediately or on every frame (this spams Events_Raise).
-// - Wait 2-5 seconds between retry attempts.
-// - Track retry state with a cooldown timer, e.g.:
-//
-//   static auto lastAttempt = std::chrono::steady_clock::time_point{};
-//   auto now = std::chrono::steady_clock::now();
-//   if (now - lastAttempt > std::chrono::seconds(3)) {
-//       lastAttempt = now;
-//       OwnedSkins::RequestOwnedSkins();
-//   }
-//
-// - When the user accepts, the next query will succeed normally.
-// - When the user denies, stop retrying. The user can re-enable later
-//   through H&S settings.
+// - Access is default-allow: an addon's first query succeeds immediately;
+//   no popup is shown. The addon is recorded so it appears in H&S settings.
+// - The user may later deny a specific addon through H&S settings, after
+//   which its queries return HOARD_STATUS_DENIED.
+// - HOARD_STATUS_PENDING is deprecated and never returned anymore. Existing
+//   callers that retry on PENDING remain compatible (they just won't see it).
 
 // ============================================================================
 // CRITICAL: Threading & Dispatch Model
@@ -189,8 +175,8 @@
 
 // Register a custom right-click context menu item on H&S search results.
 // Payload: HoardContextMenuRegister* (stack-allocated)
-// Requires permission approval. If pending, the registration is queued and
-// applied automatically once the user approves.
+// Allowed by default and applied immediately; only fails if the user has
+// explicitly denied this addon in H&S settings.
 #define EV_HOARD_CONTEXT_MENU_REGISTER "EV_HOARD_CONTEXT_MENU_REGISTER"
 
 // Query the list of configured accounts.
@@ -272,7 +258,7 @@ struct HoardItemLocationEntry {
 // Response: item query result
 struct HoardQueryItemResponse {
     uint32_t api_version;       // HOARD_API_VERSION
-    uint8_t status;             // HOARD_STATUS_OK, HOARD_STATUS_DENIED, or HOARD_STATUS_PENDING
+    uint8_t status;             // HOARD_STATUS_OK or HOARD_STATUS_DENIED (BUSY for network-served queries)
     uint32_t item_id;
     char name[128];
     char rarity[32];
@@ -295,7 +281,7 @@ struct HoardQueryWalletRequest {
 // Response: wallet query result
 struct HoardQueryWalletResponse {
     uint32_t api_version;       // HOARD_API_VERSION
-    uint8_t status;             // HOARD_STATUS_OK, HOARD_STATUS_DENIED, or HOARD_STATUS_PENDING
+    uint8_t status;             // HOARD_STATUS_OK or HOARD_STATUS_DENIED (BUSY for network-served queries)
     uint32_t currency_id;
     char name[128];
     int32_t amount;
@@ -326,7 +312,7 @@ struct HoardAchievementEntry {
 // Response: achievement query result
 struct HoardQueryAchievementResponse {
     uint32_t api_version;       // HOARD_API_VERSION
-    uint8_t status;             // HOARD_STATUS_OK, HOARD_STATUS_DENIED, or HOARD_STATUS_PENDING
+    uint8_t status;             // HOARD_STATUS_OK or HOARD_STATUS_DENIED (BUSY for network-served queries)
     char account_name[64];      // Which account was queried (echoed from request)
     uint32_t entry_count;       // Number of entries returned
     HoardAchievementEntry entries[200];
@@ -356,7 +342,7 @@ struct HoardMasteryEntry {
 // Response: mastery query result
 struct HoardQueryMasteryResponse {
     uint32_t api_version;       // HOARD_API_VERSION
-    uint8_t status;             // HOARD_STATUS_OK, HOARD_STATUS_DENIED, or HOARD_STATUS_PENDING
+    uint8_t status;             // HOARD_STATUS_OK or HOARD_STATUS_DENIED (BUSY for network-served queries)
     char account_name[64];      // Which account was queried (echoed from request)
     uint32_t entry_count;       // Number of entries returned
     HoardMasteryEntry entries[200];
@@ -386,7 +372,7 @@ struct HoardSkinEntry {
 // Response: skin unlock query result
 struct HoardQuerySkinsResponse {
     uint32_t api_version;       // HOARD_API_VERSION
-    uint8_t status;             // HOARD_STATUS_OK, HOARD_STATUS_DENIED, or HOARD_STATUS_PENDING
+    uint8_t status;             // HOARD_STATUS_OK or HOARD_STATUS_DENIED (BUSY for network-served queries)
     char account_name[64];      // Which account was queried (echoed from request)
     uint32_t entry_count;       // Number of entries returned
     HoardSkinEntry entries[200];
@@ -416,7 +402,7 @@ struct HoardRecipeEntry {
 // Response: recipe unlock query result
 struct HoardQueryRecipesResponse {
     uint32_t api_version;       // HOARD_API_VERSION
-    uint8_t status;             // HOARD_STATUS_OK, HOARD_STATUS_DENIED, or HOARD_STATUS_PENDING
+    uint8_t status;             // HOARD_STATUS_OK or HOARD_STATUS_DENIED (BUSY for network-served queries)
     char account_name[64];      // Which account was queried (echoed from request)
     uint32_t entry_count;       // Number of entries returned
     HoardRecipeEntry entries[200];
@@ -450,7 +436,7 @@ struct HoardWizardsVaultObjective {
 // Response: Wizard's Vault query result
 struct HoardQueryWizardsVaultResponse {
     uint32_t api_version;       // HOARD_API_VERSION
-    uint8_t status;             // HOARD_STATUS_OK, HOARD_STATUS_DENIED, or HOARD_STATUS_PENDING
+    uint8_t status;             // HOARD_STATUS_OK or HOARD_STATUS_DENIED (BUSY for network-served queries)
     char account_name[64];      // Which account was queried (echoed from request)
     uint8_t type;               // 0 = daily, 1 = weekly, 2 = special
     int32_t meta_progress_current;
@@ -478,7 +464,7 @@ struct HoardQueryApiRequest {
 // Response: generic API proxy result (raw JSON)
 struct HoardQueryApiResponse {
     uint32_t api_version;       // HOARD_API_VERSION
-    uint8_t status;             // HOARD_STATUS_OK, HOARD_STATUS_DENIED, or HOARD_STATUS_PENDING
+    uint8_t status;             // HOARD_STATUS_OK or HOARD_STATUS_DENIED (BUSY for network-served queries)
     char account_name[64];      // Which account was queried (echoed from request)
     char endpoint[256];         // Echo of the requested endpoint
     uint32_t json_length;       // Actual length of the JSON data (may exceed buffer if truncated)
@@ -540,7 +526,7 @@ struct HoardAccountEntry {
 // Response: account list
 struct HoardQueryAccountsResponse {
     uint32_t api_version;       // HOARD_API_VERSION
-    uint8_t status;             // HOARD_STATUS_OK, HOARD_STATUS_DENIED, or HOARD_STATUS_PENDING
+    uint8_t status;             // HOARD_STATUS_OK or HOARD_STATUS_DENIED (BUSY for network-served queries)
     uint32_t account_count;     // Number of accounts
     HoardAccountEntry accounts[16]; // Up to 16 accounts
 };

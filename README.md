@@ -18,13 +18,12 @@ If an LLM creating software upsets you, then perhaps this repo isn't for you. Mo
 - **Cross-addon API** — other addons can query item counts, wallet balances, achievements, masteries, skin/recipe unlocks, and Wizard's Vault progress via Nexus events
 - **Generic API proxy** — other addons can query any authenticated GW2 API endpoint through H&S
 - **Context menu hooks** — other addons can register custom right-click menu items on search results
-- **Permission system** — users control which addons can access their account data
+- **Addon access control** — other addons work out of the box (no approval prompts); users can deny any addon from the settings panel
 
 ## Screenshots
 
 ![Search results](screenshots/main_window_1.png)
 ![Options panel](screenshots/options.png)
-![Permission request](screenshots/permissions.png)
 
 <details>
 <summary><h2>GW2 API Endpoints Used</h2></summary>
@@ -113,7 +112,7 @@ When multiple accounts are configured, search results are grouped by account usi
 
 ## Cross-Addon API
 
-Hoard & Seek exposes a Nexus event-based API so other addons can query item counts, wallet balances, achievements, masteries, skin/recipe unlocks, Wizard's Vault progress, and any authenticated GW2 API endpoint — without their own API key. It also supports context menu hooks, multi-account queries, and a permission system for user consent.
+Hoard & Seek exposes a Nexus event-based API so other addons can query item counts, wallet balances, achievements, masteries, skin/recipe unlocks, Wizard's Vault progress, and any authenticated GW2 API endpoint — without their own API key. It also supports context menu hooks and multi-account queries. Addons work without any approval step; users can deny individual addons in settings.
 
 **No link-time dependency required** — just copy `include/HoardAndSeekAPI.h` into your addon and communicate via Nexus events.
 
@@ -141,8 +140,8 @@ hoard_and_seek/
 │   ├── GW2API.cpp              # GW2 API implementation (HTTP, caching, search)
 │   ├── IconManager.h           # Async icon download and texture management
 │   ├── IconManager.cpp         # Icon download worker, disk cache, Nexus texture loading
-│   ├── PermissionManager.h     # Per-addon permission checking and UI
-│   └── PermissionManager.cpp   # Permission persistence, popup, and settings panel
+│   ├── PermissionManager.h     # Per-addon access checking and UI
+│   └── PermissionManager.cpp   # Default-allow checks, denial persistence, settings panel
 ├── scripts/
 │   └── setup.sh                # Dependency download script
 └── README.md

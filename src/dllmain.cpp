@@ -343,7 +343,6 @@ struct ContextMenuItem {
     uint8_t item_types; // HOARD_MENU_ITEMS, HOARD_MENU_WALLET, HOARD_MENU_ALL
 };
 static std::vector<ContextMenuItem> g_ContextMenuItems;
-static std::vector<ContextMenuItem> g_PendingContextMenuItems; // Awaiting permission approval
 static std::mutex g_ContextMenuMutex;
 
 // GW2 rarity colors
@@ -744,18 +743,15 @@ void OnSearchRequest(void* eventArgs) {
 }
 
 // Helper: check permission for a requester/event pair.
-// Returns HOARD_STATUS_OK if allowed, HOARD_STATUS_DENIED if denied,
-// HOARD_STATUS_PENDING if not yet decided (popup queued).
+// Default-allow: unknown requesters are granted automatically (and recorded
+// so the user can deny them later in settings). Returns HOARD_STATUS_OK if
+// allowed, HOARD_STATUS_DENIED if the user has explicitly denied this addon.
 static uint8_t CheckAddonPermission(const char* requester, const char* event_name) {
     if (!requester || requester[0] == '\0') return HOARD_STATUS_DENIED;
     std::string req_str(requester);
     std::string ev_str(event_name);
-    auto state = HoardAndSeek::PermissionManager::Check(req_str, ev_str);
+    auto state = HoardAndSeek::PermissionManager::CheckOrAutoAllow(req_str, ev_str);
     if (state == HoardAndSeek::PermissionState::Allowed) return HOARD_STATUS_OK;
-    if (state == HoardAndSeek::PermissionState::Unknown) {
-        HoardAndSeek::PermissionManager::RequestPermission(req_str, ev_str);
-        return HOARD_STATUS_PENDING;
-    }
     return HOARD_STATUS_DENIED;
 }
 
@@ -1386,18 +1382,6 @@ void OnContextMenuRegister(void* eventArgs) {
     item.item_types = reg->item_types ? reg->item_types : HOARD_MENU_ALL;
 
     uint8_t perm = CheckAddonPermission(reg->requester, EV_HOARD_CONTEXT_MENU_REGISTER);
-    if (perm == HOARD_STATUS_PENDING) {
-        // Queue for later — will be applied when permission is granted
-        std::lock_guard<std::mutex> lock(g_ContextMenuMutex);
-        for (auto& existing : g_PendingContextMenuItems) {
-            if (existing.id == item.id && existing.requester == item.requester) {
-                existing = item;
-                return;
-            }
-        }
-        g_PendingContextMenuItems.push_back(item);
-        return;
-    }
     if (perm != HOARD_STATUS_OK) return;
 
     std::lock_guard<std::mutex> lock(g_ContextMenuMutex);
@@ -1789,41 +1773,6 @@ void AddonRender() {
     HoardAndSeek::IconManager::Tick();
 
     ThemeGuard themeGuard;
-
-    // Render permission popup (always, even if main window is hidden)
-    HoardAndSeek::PermissionManager::RenderPopup();
-
-    // Flush pending context menu registrations whose permissions were granted
-    {
-        std::lock_guard<std::mutex> lock(g_ContextMenuMutex);
-        auto it = g_PendingContextMenuItems.begin();
-        while (it != g_PendingContextMenuItems.end()) {
-            auto state = HoardAndSeek::PermissionManager::Check(it->requester, EV_HOARD_CONTEXT_MENU_REGISTER);
-            if (state == HoardAndSeek::PermissionState::Allowed) {
-                // Move to active list
-                bool replaced = false;
-                for (auto& existing : g_ContextMenuItems) {
-                    if (existing.id == it->id && existing.requester == it->requester) {
-                        existing = *it;
-                        replaced = true;
-                        break;
-                    }
-                }
-                if (!replaced) {
-                    g_ContextMenuItems.push_back(*it);
-                    if (APIDefs) {
-                        std::string msg = "Context menu registered: \"" + it->label + "\" by " + it->requester;
-                        APIDefs->Log(LOGL_INFO, "HoardAndSeek", msg.c_str());
-                    }
-                }
-                it = g_PendingContextMenuItems.erase(it);
-            } else if (state == HoardAndSeek::PermissionState::Denied) {
-                it = g_PendingContextMenuItems.erase(it);
-            } else {
-                ++it; // Still pending
-            }
-        }
-    }
 
     // Broadcast fetch progress and data-updated events
     {
@@ -2415,6 +2364,8 @@ void AddonOptions() {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Text("Addon Permissions:");
+    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+        "Addons are allowed by default. Uncheck an item to deny it.");
     HoardAndSeek::PermissionManager::RenderSettings();
 }
 

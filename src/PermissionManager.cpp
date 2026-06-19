@@ -11,13 +11,7 @@ using json = nlohmann::json;
 namespace HoardAndSeek {
 
     std::unordered_map<std::string, std::unordered_map<std::string, PermissionState>> PermissionManager::s_permissions;
-    std::vector<PendingPermission> PermissionManager::s_pending;
-    bool PermissionManager::s_showing_popup = false;
-    std::string PermissionManager::s_current_requester;
-    std::vector<PermissionManager::PromptEntry> PermissionManager::s_current_entries;
     std::mutex PermissionManager::s_mutex;
-    std::chrono::steady_clock::time_point PermissionManager::s_first_pending_time;
-    bool PermissionManager::s_collecting = false;
 
     static const struct {
         const char* event_name;
@@ -55,6 +49,21 @@ namespace HoardAndSeek {
         return ev_it->second;
     }
 
+    PermissionState PermissionManager::CheckOrAutoAllow(const std::string& requester, const std::string& event_name) {
+        {
+            std::lock_guard<std::mutex> lock(s_mutex);
+            auto it = s_permissions.find(requester);
+            if (it != s_permissions.end()) {
+                auto ev_it = it->second.find(event_name);
+                if (ev_it != it->second.end()) return ev_it->second;
+            }
+            // Unknown requester — default-allow and record it.
+            s_permissions[requester][event_name] = PermissionState::Allowed;
+        }
+        Save();
+        return PermissionState::Allowed;
+    }
+
     void PermissionManager::Grant(const std::string& requester, const std::string& event_name) {
         {
             std::lock_guard<std::mutex> lock(s_mutex);
@@ -85,157 +94,6 @@ namespace HoardAndSeek {
         Save();
     }
 
-    bool PermissionManager::RequestPermission(const std::string& requester, const std::string& event_name) {
-        std::lock_guard<std::mutex> lock(s_mutex);
-
-        // Already decided
-        auto it = s_permissions.find(requester);
-        if (it != s_permissions.end() && it->second.count(event_name)) {
-            return false;
-        }
-
-        // Already queued
-        for (const auto& p : s_pending) {
-            if (p.requester == requester && p.event_name == event_name) {
-                return false;
-            }
-        }
-
-        // Also check if it's in the current batch popup
-        if (s_showing_popup && s_current_requester == requester) {
-            for (const auto& e : s_current_entries) {
-                if (e.event_name == event_name) return false;
-            }
-            // Same requester, new event — add to current popup
-            PromptEntry entry;
-            entry.event_name = event_name;
-            entry.description = GetEventDescription(event_name);
-            entry.checked = true;
-            s_current_entries.push_back(entry);
-            return true;
-        }
-
-        PendingPermission pp;
-        pp.requester = requester;
-        pp.event_name = event_name;
-        pp.description = GetEventDescription(event_name);
-        s_pending.push_back(pp);
-
-        // Start collection timer on first pending item
-        if (!s_collecting) {
-            s_first_pending_time = std::chrono::steady_clock::now();
-            s_collecting = true;
-        }
-        return true;
-    }
-
-    bool PermissionManager::RenderPopup() {
-        // Collect all pending for the first requester if not currently showing
-        if (!s_showing_popup) {
-            std::lock_guard<std::mutex> lock(s_mutex);
-            if (s_pending.empty()) {
-                s_collecting = false;
-                return false;
-            }
-
-            // Wait 500ms after first pending item to let all requests accumulate
-            if (s_collecting) {
-                auto elapsed = std::chrono::steady_clock::now() - s_first_pending_time;
-                if (elapsed < std::chrono::milliseconds(500)) {
-                    return false; // Still collecting
-                }
-                s_collecting = false;
-            }
-
-            // Group by first requester found
-            s_current_requester = s_pending.front().requester;
-            s_current_entries.clear();
-
-            auto it = s_pending.begin();
-            while (it != s_pending.end()) {
-                if (it->requester == s_current_requester) {
-                    PromptEntry entry;
-                    entry.event_name = it->event_name;
-                    entry.description = it->description;
-                    entry.checked = true; // default to allowed
-                    s_current_entries.push_back(entry);
-                    it = s_pending.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-
-            s_showing_popup = true;
-            ImGui::OpenPopup("H&S Permission Request");
-        }
-
-        bool still_open = true;
-        ImVec2 display = ImGui::GetIO().DisplaySize;
-        ImVec2 center(display.x * 0.5f, display.y * 0.5f);
-        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-
-        if (ImGui::BeginPopupModal("H&S Permission Request", &still_open, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::Text("Addon requesting access to your account data:");
-            ImGui::Spacing();
-
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.0f, 1.0f));
-            ImGui::Text("%s", s_current_requester.c_str());
-            ImGui::PopStyleColor();
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            ImGui::Text("Permissions requested:");
-            ImGui::Spacing();
-
-            for (size_t i = 0; i < s_current_entries.size(); i++) {
-                auto& entry = s_current_entries[i];
-                std::string label = entry.description + "##perm" + std::to_string(i);
-                ImGui::Checkbox(label.c_str(), &entry.checked);
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(%s)", entry.event_name.c_str());
-            }
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            float button_width = 120.0f;
-            float avail = ImGui::GetContentRegionAvail().x;
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - button_width) * 0.5f);
-
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.7f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 0.8f, 1.0f));
-            if (ImGui::Button("Confirm", ImVec2(button_width, 0))) {
-                for (const auto& entry : s_current_entries) {
-                    if (entry.checked) {
-                        Grant(s_current_requester, entry.event_name);
-                    } else {
-                        Deny(s_current_requester, entry.event_name);
-                    }
-                }
-                s_current_entries.clear();
-                s_showing_popup = false;
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::PopStyleColor(2);
-
-            ImGui::EndPopup();
-        }
-
-        // User closed via X button — deny all unchecked
-        if (!still_open) {
-            for (const auto& entry : s_current_entries) {
-                Deny(s_current_requester, entry.event_name);
-            }
-            s_current_entries.clear();
-            s_showing_popup = false;
-        }
-
-        return s_showing_popup;
-    }
-
     void PermissionManager::RenderSettings() {
         bool needs_save = false;
 
@@ -243,7 +101,7 @@ namespace HoardAndSeek {
             std::lock_guard<std::mutex> lock(s_mutex);
 
             if (s_permissions.empty()) {
-                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "No addon permissions have been set yet.");
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "No addons have queried Hoard & Seek yet.");
                 return;
             }
 
