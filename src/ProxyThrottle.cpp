@@ -184,6 +184,14 @@ double CurrentRefillRate() {
     return g_effective_rate;
 }
 
+int BackoffSecondsRemaining() {
+    std::lock_guard<std::mutex> lock(g_rate_mutex);
+    auto now = std::chrono::steady_clock::now();
+    if (now >= g_backoff_until) return 0;
+    auto remaining = std::chrono::duration_cast<std::chrono::seconds>(g_backoff_until - now).count();
+    return (int)remaining + 1; // round up so countdown reads naturally
+}
+
 void Start() {
     std::lock_guard<std::mutex> lock(g_queue_mutex);
     if (g_worker_run) return;

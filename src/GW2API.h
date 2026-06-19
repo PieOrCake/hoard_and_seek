@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <mutex>
+#include <atomic>
 #include <nlohmann/json.hpp>
 
 namespace HoardAndSeek {
@@ -100,6 +101,11 @@ namespace HoardAndSeek {
 
         // Query: has data been fetched for any account?
         static bool HasAccountData();
+
+        // Monotonically increasing version of s_item_locations.
+        // Bumped on every per-account commit and on LoadAccountData.
+        // Callers compare against a stored value to detect changes.
+        static uint64_t GetDataVersion();
 
         // Timestamp of last successful data fetch (earliest across accounts, 0 if never)
         static time_t GetLastUpdated();

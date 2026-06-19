@@ -1964,8 +1964,14 @@ void AddonRender() {
         // Reset timers so next success/error shows fresh
         s_successTimerStarted = false;
         s_errorTimerStarted = false;
-        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.0f, 1.0f), "%s",
-            HoardAndSeek::GW2API::GetFetchStatusMessage().c_str());
+        int rl_secs = HoardAndSeek::ProxyThrottle::BackoffSecondsRemaining();
+        if (rl_secs > 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.1f, 1.0f),
+                "GW2 API rate limit hit - slowing down (%ds)", rl_secs);
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.0f, 1.0f), "%s",
+                HoardAndSeek::GW2API::GetFetchStatusMessage().c_str());
+        }
     } else if (fetchStatus == HoardAndSeek::FetchStatus::Error) {
         if (!s_errorTimerStarted) {
             s_errorTime = std::chrono::steady_clock::now();
@@ -2108,6 +2114,20 @@ void AddonRender() {
         if ((int)strlen(g_SearchFilter) < g_MinSearchLength) {
             g_SearchResults.clear();
             g_SearchDirty = false;
+        }
+    }
+
+    // If account data has changed since the last search dispatch, re-run.
+    // Prevents stale results when refresh, load, or per-account commit alters s_item_locations.
+    {
+        static uint64_t s_LastSeenDataVersion = 0;
+        uint64_t cur = HoardAndSeek::GW2API::GetDataVersion();
+        if (cur != s_LastSeenDataVersion) {
+            s_LastSeenDataVersion = cur;
+            if ((int)strlen(g_SearchFilter) >= g_MinSearchLength) {
+                g_SearchDirty = true;
+                g_SearchLastKeystroke = std::chrono::steady_clock::now() - std::chrono::milliseconds(200);
+            }
         }
     }
 

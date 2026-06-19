@@ -51,6 +51,13 @@ namespace HoardAndSeek {
     bool GW2API::s_has_account_data = false;
     std::mutex GW2API::s_mutex;
 
+    // Monotonically increasing version counter for s_item_locations.
+    static std::atomic<uint64_t> s_data_version{0};
+
+    uint64_t GW2API::GetDataVersion() {
+        return s_data_version.load(std::memory_order_acquire);
+    }
+
     // Helper: get the DLL directory
     static std::string GetDllDir() {
         char dllPath[MAX_PATH];
@@ -253,6 +260,7 @@ namespace HoardAndSeek {
                 } catch (...) {}
                 s_accounts.erase(it);
                 s_has_account_data = !s_item_locations.empty();
+                s_data_version.fetch_add(1, std::memory_order_release);
                 return true;
             }
         }
@@ -1141,6 +1149,7 @@ namespace HoardAndSeek {
                         ClearAccountLocations(target.account_name);
                         MergeLocations(locations);
                         s_has_account_data = !s_item_locations.empty();
+                        s_data_version.fetch_add(1, std::memory_order_release);
 
                         // Update account's last_updated
                         for (auto& acct : s_accounts) {
@@ -1517,6 +1526,7 @@ namespace HoardAndSeek {
         }
 
         s_has_account_data = !s_item_locations.empty();
+        s_data_version.fetch_add(1, std::memory_order_release);
         return s_has_account_data;
     }
 

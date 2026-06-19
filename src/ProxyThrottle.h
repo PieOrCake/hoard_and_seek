@@ -25,6 +25,9 @@ namespace ProxyThrottle {
     void AcquireToken();
     void NotifyRateLimited();
     double CurrentRefillRate();
+    // Returns seconds remaining in the 429 backoff window, or 0 if not currently
+    // backing off. Used by the UI to surface "GW2 API rate limited" to the user.
+    int BackoffSecondsRemaining();
 
     // --- Cache ---
     bool CacheLookup(const std::string& account_name,
